@@ -19,11 +19,14 @@ mod bindings {
 pub use bindings::horizon::mods::{
     game::{Clock, Player},
     hud::{Corner, Line},
+    input::{Click, Event as InputEvent, HeldItem, ItemUse},
+    ui::{Draw, Point, Rect},
+    world::Hit,
 };
 use bindings::{
     HorizonMod,
     exports::horizon::mods::events::Registration,
-    horizon::mods::{chat, game, hud, log as mod_log, storage},
+    horizon::mods::{chat, game, hud, input, log as mod_log, render, storage, ui, world},
 };
 
 /// A mod's linear memory cap.
@@ -52,12 +55,32 @@ const STORAGE_WRITE_BUDGET: u64 = 1 << 20;
 /// A mod's data, beside its `horizon-mods` folder (`find`'s `path.parent()`
 /// never has a manifest there, so `find` never mistakes it for a mod).
 const STORAGE_DIR: &str = ".horizon-mod-data";
+/// Input events kept for a mod between `poll`s; older ones are dropped.
+const EVENTS_KEPT: usize = 256;
+/// Items one mod may claim, keys it may register.
+const CLAIMS: usize = 64;
+const KEYS: usize = 32;
+/// Draw operations in a mod's screen.
+const UI_DRAWS: usize = 4096;
+/// Commands one call may queue (`world.run-commands`), sounds per call.
+const COMMANDS_PER_CALL: usize = 8192;
+const SOUNDS_PER_CALL: usize = 64;
+/// A post pass's source, and its parameters.
+const POST_SOURCE: usize = 256 << 10;
+pub const POST_PARAMS: usize = 16;
+/// How far `world.raycast` sees.
+pub const RAYCAST_MAX: f32 = 256.0;
 
 /// What mods may read of the game, copied once per tick by the game.
 #[derive(Clone, Debug, Default)]
 pub struct Snapshot {
     pub player: Option<Player>,
     pub clock: Option<Clock>,
+    /// The stack in the main hand (capability `input`).
+    pub held: Option<HeldItem>,
+    /// The first block along the view within `RAYCAST_MAX`, and its
+    /// distance (capability `world`).
+    pub view_hit: Option<(f32, Hit)>,
 }
 
 /// What mods asked the game to show since the last [`Mods::drain`].
@@ -69,6 +92,26 @@ pub enum Output {
     Feedback { text: String, error: bool },
     /// The mod was turned off: it trapped, overran or failed to start.
     Stopped { name: String, reason: String },
+    /// `ui.show` opened mod `id`'s screen, or `ui.close` closed it.
+    Screen { id: String, open: bool },
+    /// `world.run-commands`: to run at operator level, silently, in order.
+    Commands { id: String, commands: Vec<String> },
+    /// `world.play-sound`.
+    Sound {
+        event: String,
+        at: Option<[f64; 3]>,
+        volume: f32,
+        pitch: f32,
+    },
+}
+
+/// A mod's post-processing pass (capability `render`).
+#[derive(Clone, Debug)]
+pub struct Post {
+    pub source: Arc<str>,
+    /// Changes when the source does: the game recompiles then.
+    pub version: u64,
+    pub params: [f32; POST_PARAMS],
 }
 
 /// A mod's text panel, drawn every frame until it changes.
@@ -119,6 +162,17 @@ struct State {
     /// needs its own budget.
     storage_budget: u64,
     limits: StoreLimits,
+    /// Capability `input`: claimed item ids, (name, key) binds, queued events.
+    claims: Vec<String>,
+    keys: Vec<(String, String)>,
+    events: Vec<InputEvent>,
+    /// Capability `ui`: what the open screen draws (None: closed), and the
+    /// cursor while it is open.
+    screen: Option<Vec<Draw>>,
+    cursor: Option<Point>,
+    /// Capability `render`.
+    post_source: Option<(Arc<str>, u64)>,
+    post_params: Option<[f32; POST_PARAMS]>,
 }
 
 /// The installed mods and the engine running them. `Mods::default()` is
@@ -129,6 +183,8 @@ pub struct Mods {
     entries: Vec<Entry>,
     snapshot: Arc<Snapshot>,
     out: Vec<Output>,
+    /// The cursor over a mod's open screen, from its centre.
+    cursor: Option<(f32, f32)>,
 }
 
 /// The `.hmod` files and mod folders in `dir`, by name.
@@ -268,6 +324,13 @@ impl Mods {
                 .memory_size(MEMORY)
                 .instances(16)
                 .build(),
+            claims: Vec::new(),
+            keys: Vec::new(),
+            events: Vec::new(),
+            screen: None,
+            cursor: None,
+            post_source: None,
+            post_params: None,
         };
         let mut store = Store::new(engine, state);
         store.limiter(|s| &mut s.limits);
@@ -334,6 +397,11 @@ impl Mods {
         let run = entry.run.as_mut()?;
         run.store.data_mut().snapshot = self.snapshot.clone();
         run.store.data_mut().storage_budget = STORAGE_WRITE_BUDGET;
+        let screen_open = run.store.data().screen.is_some();
+        run.store.data_mut().cursor = self
+            .cursor
+            .filter(|_| screen_open)
+            .map(|(x, y)| Point { x, y });
         let started = Instant::now();
         let result = run
             .store
@@ -428,6 +496,86 @@ impl Mods {
     /// What mods asked to show since the last call.
     pub fn drain(&mut self) -> Vec<Output> {
         std::mem::take(&mut self.out)
+    }
+
+    /// The running mod with manifest id `id`.
+    fn running(&self, id: &str) -> Option<&Running> {
+        self.entries
+            .iter()
+            .filter(|e| e.manifest.as_ref().is_some_and(|m| m.id == id))
+            .find_map(|e| e.run.as_ref())
+    }
+    fn running_mut(&mut self, id: &str) -> Option<&mut Running> {
+        self.entries
+            .iter_mut()
+            .filter(|e| e.manifest.as_ref().is_some_and(|m| m.id == id))
+            .find_map(|e| e.run.as_mut())
+    }
+    /// The id of the running mod that claims the use of item `item`.
+    pub fn claimant(&self, item: &str) -> Option<&str> {
+        self.entries.iter().find_map(|e| {
+            let run = e.run.as_ref()?;
+            run.store
+                .data()
+                .claims
+                .iter()
+                .any(|c| c == item)
+                .then(|| run.store.data().id.as_str())
+        })
+    }
+    /// (mod id, bind name) for each registered keybind on `key` (a key
+    /// name as options.txt writes it).
+    pub fn keys_on(&self, key: &str) -> Vec<(String, String)> {
+        self.entries
+            .iter()
+            .filter_map(|e| e.run.as_ref())
+            .flat_map(|r| {
+                let s = r.store.data();
+                s.keys
+                    .iter()
+                    .filter(|(_, k)| k == key)
+                    .map(|(name, _)| (s.id.clone(), name.clone()))
+            })
+            .collect()
+    }
+    /// Queues an input event for mod `id`'s next `poll`.
+    pub fn push_event(&mut self, id: &str, event: InputEvent) {
+        if let Some(run) = self.running_mut(id) {
+            let events = &mut run.store.data_mut().events;
+            if events.len() >= EVENTS_KEPT {
+                events.remove(0);
+            }
+            events.push(event);
+        }
+    }
+    /// What mod `id`'s screen draws, while it is open.
+    pub fn screen(&self, id: &str) -> Option<&[Draw]> {
+        self.running(id)?.store.data().screen.as_deref()
+    }
+    /// The player closed mod `id`'s screen.
+    pub fn screen_closed(&mut self, id: &str) {
+        if let Some(run) = self.running_mut(id)
+            && run.store.data_mut().screen.take().is_some()
+        {
+            self.push_event(id, InputEvent::ScreenClosed);
+        }
+    }
+    /// The cursor over an open mod screen, from its centre in GUI pixels.
+    pub fn set_cursor(&mut self, cursor: Option<(f32, f32)>) {
+        self.cursor = cursor;
+    }
+    /// The first running mod's post-processing pass, when it has a source
+    /// and parameters.
+    pub fn post(&self) -> Option<Post> {
+        self.entries.iter().find_map(|e| {
+            let s = e.run.as_ref()?.store.data();
+            let (source, version) = s.post_source.clone()?;
+            Some(Post {
+                source,
+                version,
+                params: s.post_params?,
+            })
+        })
     }
 
     /// Restarts the mods whose file changed since they loaded (mod
@@ -590,6 +738,133 @@ impl storage::Host for State {
     fn delete(&mut self, key: String) {
         if storage_key_ok(&key) {
             let _ = std::fs::remove_file(self.data_dir.join(&key));
+        }
+    }
+}
+
+impl input::Host for State {
+    fn claim_items(&mut self, ids: Vec<String>) {
+        self.claims = ids.into_iter().take(CLAIMS).collect();
+    }
+    fn register_key(&mut self, name: String, key: String) {
+        self.keys.retain(|(n, _)| *n != name);
+        if self.keys.len() < KEYS {
+            self.keys.push((clip(name), clip(key)));
+        }
+    }
+    fn held(&mut self) -> Option<HeldItem> {
+        self.snapshot.held.clone()
+    }
+    fn poll(&mut self) -> Vec<InputEvent> {
+        std::mem::take(&mut self.events)
+    }
+}
+impl ui::Host for State {
+    fn show(&mut self, mut draws: Vec<Draw>) {
+        draws.truncate(UI_DRAWS);
+        for d in &mut draws {
+            if let Draw::Text((text, ..)) = d {
+                *text = clip(std::mem::take(text));
+            }
+        }
+        if self.screen.replace(draws).is_none() {
+            let id = self.id.clone();
+            self.out.push(Output::Screen { id, open: true });
+        }
+    }
+    fn close(&mut self) {
+        if self.screen.take().is_some() {
+            let id = self.id.clone();
+            self.out.push(Output::Screen { id, open: false });
+        }
+    }
+    fn cursor(&mut self) -> Option<Point> {
+        self.cursor
+    }
+}
+impl render::Host for State {
+    fn set_post(&mut self, wgsl: String) {
+        if wgsl.len() > POST_SOURCE {
+            log::warn!(
+                "[mod {}] post pass over {} KiB, ignored",
+                self.id,
+                POST_SOURCE >> 10
+            );
+            return;
+        }
+        if self.post_source.as_ref().is_some_and(|(s, _)| **s == *wgsl) {
+            return;
+        }
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.id.hash(&mut h);
+        wgsl.hash(&mut h);
+        self.post_source = Some((Arc::from(wgsl), h.finish()));
+    }
+    fn set_params(&mut self, params: Vec<f32>) {
+        let mut p = [0.0; POST_PARAMS];
+        for (to, from) in p.iter_mut().zip(params) {
+            *to = if from.is_finite() { from } else { 0.0 };
+        }
+        self.post_params = Some(p);
+    }
+    fn clear_post(&mut self) {
+        self.post_source = None;
+        self.post_params = None;
+    }
+}
+impl world::Host for State {
+    fn raycast(&mut self, distance: f32) -> Option<Hit> {
+        let max = distance.clamp(0.0, RAYCAST_MAX);
+        self.snapshot
+            .view_hit
+            .as_ref()
+            .filter(|(d, _)| *d <= max)
+            .map(|(_, hit)| hit.clone())
+    }
+    fn run_commands(&mut self, commands: Vec<String>) {
+        let queued: usize = self
+            .out
+            .iter()
+            .map(|o| match o {
+                Output::Commands { commands, .. } => commands.len(),
+                _ => 0,
+            })
+            .sum();
+        let room = COMMANDS_PER_CALL.saturating_sub(queued);
+        if commands.len() > room {
+            log::warn!(
+                "[mod {}] over {COMMANDS_PER_CALL} commands in one call; the rest dropped",
+                self.id
+            );
+        }
+        let commands: Vec<String> = commands.into_iter().take(room).collect();
+        if !commands.is_empty() {
+            let id = self.id.clone();
+            self.out.push(Output::Commands { id, commands });
+        }
+    }
+    fn play_sound(&mut self, event: String, at: Option<(f64, f64, f64)>, volume: f32, pitch: f32) {
+        let sounds = self
+            .out
+            .iter()
+            .filter(|o| matches!(o, Output::Sound { .. }))
+            .count();
+        if sounds < SOUNDS_PER_CALL {
+            self.out.push(Output::Sound {
+                event: clip(event),
+                at: at.map(|(x, y, z)| [x, y, z]),
+                volume: if volume.is_finite() {
+                    volume.clamp(0.0, 16.0)
+                } else {
+                    1.0
+                },
+                pitch: if pitch.is_finite() {
+                    pitch.clamp(0.0, 4.0)
+                } else {
+                    1.0
+                },
+            });
         }
     }
 }

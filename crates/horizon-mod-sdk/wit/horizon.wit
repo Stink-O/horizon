@@ -77,6 +77,136 @@ interface storage {
     delete: func(key: string);
 }
 
+/// Capability `input`: right-clicks with items the mod claims, keybinds it
+/// registers, and clicks on its screen (capability `ui`). Events queue up
+/// between calls; the mod collects them with `poll`, usually each tick.
+interface input {
+    /// An item stack as the mod sees it.
+    record held-item {
+        /// `minecraft:spyglass`, `mymod:wand`, ...
+        id: string,
+        count: u32,
+        /// 0-8 the hotbar, 40 the offhand.
+        slot: u32,
+        /// `minecraft:custom_name` as plain text.
+        custom-name: option<string>,
+        /// `minecraft:custom_data` as SNBT.
+        custom-data: option<string>,
+    }
+    record item-use {
+        item: held-item,
+        /// Game ticks the button was held (0 on `use-start`).
+        ticks: u32,
+    }
+    record click {
+        /// GUI pixels from the centre of the screen (as `ui.show` draws).
+        x: f32,
+        y: f32,
+        /// 0 left, 1 right, 2 middle.
+        button: u32,
+    }
+    variant event {
+        /// The use button went down with a claimed item in hand. The game does
+        /// nothing else with the click: no zoom, no placing, no swing.
+        use-start(item-use),
+        /// It came up again (or the player switched slots, or a screen opened).
+        use-stop(item-use),
+        /// A registered key went down or up while playing (no screen open).
+        key-down(string),
+        key-up(string),
+        /// A click on the mod's screen.
+        screen-click(click),
+        /// The player closed the mod's screen (Escape).
+        screen-closed,
+    }
+    /// Items whose use the mod handles instead of the game, by id. Replaces
+    /// the previous list.
+    claim-items: func(ids: list<string>);
+    /// A keybind: `name` is the mod's own (it comes back in `key-down`),
+    /// `key` a key name as options.txt writes them (`key.keyboard.r`).
+    register-key: func(name: string, key: string);
+    /// The stack in the main hand, as of this tick.
+    held: func() -> option<held-item>;
+    /// The events since the last call, oldest first (at most 256 are kept).
+    poll: func() -> list<event>;
+}
+
+/// Capability `ui`: one screen the mod owns. The mod hands the game what to
+/// draw; the game draws it every frame, releases the mouse, and sends clicks
+/// and Escape back as `input` events. It does not pause the game.
+interface ui {
+    record rect {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+    }
+    record point {
+        x: f32,
+        y: f32,
+    }
+    variant draw {
+        /// A filled rectangle, colour 0xAARRGGBB.
+        fill(tuple<rect, u32>),
+        /// Any four-cornered shape (wheel segments, arrows), 0xAARRGGBB.
+        quad(tuple<list<point>, u32>),
+        /// A GUI sprite (`gui/sprites/...`, or a mod's `gui/...` texture)
+        /// stretched over a rectangle, tinted 0xAARRGGBB.
+        sprite(tuple<string, rect, u32>),
+        /// An item, drawn as the hotbar draws it, at 16 x 16 times `scale`.
+        /// The second string is an item model id to use instead (or empty).
+        item(tuple<string, string, point, f32>),
+        /// Text with a shadow, 0xRRGGBB; centred on `x` when the bool is set.
+        text(tuple<string, point, u32, bool>),
+    }
+    /// Opens the mod's screen (or redraws it): coordinates are GUI pixels
+    /// from the screen's centre, drawn in order.
+    show: func(draws: list<draw>);
+    close: func();
+    /// The cursor in GUI pixels from the centre while the screen is open.
+    cursor: func() -> option<point>;
+}
+
+/// Capability `render`: a post-processing pass the mod supplies, drawn over
+/// the world (under the hand and the HUD) after the shader pack, if any.
+interface render {
+    /// The pass: a fragment shader in the shader-pack stage format
+    /// (docs/shader-packs.md: the prelude's bindings and helpers, an
+    /// `fs_main` entry). Compiled once per distinct source; an error is
+    /// logged and the pass skipped.
+    set-post: func(wgsl: string);
+    /// Sixteen floats the pass reads as `frame.mod_params[0..4]`, kept until
+    /// changed. The pass runs only while some are set.
+    set-params: func(params: list<f32>);
+    clear-post: func();
+}
+
+/// Capability `world`: the world around the player, and changes to it.
+/// Changes need a world this game runs (single player, or hosting LAN);
+/// on a remote server they are ignored and logged.
+interface %world {
+    record hit {
+        /// The block hit and the point on its face.
+        block-x: s32,
+        block-y: s32,
+        block-z: s32,
+        x: f64,
+        y: f64,
+        z: f64,
+        /// `minecraft:stone`, ...
+        block: string,
+    }
+    /// The first block along the player's view (fluids pass), up to
+    /// `distance` blocks (at most 256), as of this tick.
+    raycast: func(distance: f32) -> option<hit>;
+    /// Runs commands as the server would (operator level, no chat feedback),
+    /// in order, right after this call returns, all in this tick.
+    run-commands: func(commands: list<string>);
+    /// A sound event (vanilla's or a resource pack's) at a point, or
+    /// following the player when `at` is none.
+    play-sound: func(event: string, at: option<tuple<f64, f64, f64>>, volume: f32, pitch: f32);
+}
+
 /// What the game calls. Only the hooks `init` asks for are ever called.
 interface events {
     record registration {
@@ -105,5 +235,9 @@ world horizon-mod {
     import chat;
     import hud;
     import storage;
+    import input;
+    import ui;
+    import render;
+    import %world;
     export events;
 }

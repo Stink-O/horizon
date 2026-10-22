@@ -20,7 +20,8 @@ impl Screen {
             | Self::Creative
             | Self::Inventory
             | Self::Dead
-            | Self::CommandBlock => false,
+            | Self::CommandBlock
+            | Self::Mod => false,
         }
     }
 }

@@ -25,6 +25,8 @@ pub struct FrameUniform {
     pub camera_state: [f32; 4],
     pub view_params: [f32; 4],
     pub dimension: [f32; 4],
+    /// A mod's post pass parameters (capability `render`).
+    pub mod_params: [[f32; 4]; 4],
 }
 
 struct Pass {
@@ -61,6 +63,19 @@ impl PackStages {
         device: &wgpu::Device,
         format: wgpu::TextureFormat,
         pack: &ShaderPack,
+    ) -> Result<Self, String> {
+        Self::from_stages(device, format, &pack.id, &pack.stages, &pack.constants())
+    }
+
+    /// The pipelines of `stages` (each source with the prelude before it),
+    /// with `constants` for the overrides they declare: a pack's, or a mod's
+    /// post pass (capability `render`).
+    pub fn from_stages(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        id: &str,
+        stages: &[crate::shader_pack::Stage],
+        constants: &[(&str, f64)],
     ) -> Result<Self, String> {
         let texture = |binding, sample_type| wgpu::BindGroupLayoutEntry {
             binding,
@@ -104,10 +119,8 @@ impl PackStages {
             bind_group_layouts: &[Some(&layout)],
             ..Default::default()
         });
-        let constants = pack.constants();
         let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
-        let passes = pack
-            .stages
+        let passes = stages
             .iter()
             .map(|stage| {
                 let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -172,7 +185,7 @@ impl PackStages {
             })
         };
         Ok(Self {
-            id: pack.id.clone(),
+            id: id.to_owned(),
             layout,
             linear: sampler(wgpu::FilterMode::Linear),
             nearest: sampler(wgpu::FilterMode::Nearest),
@@ -184,6 +197,17 @@ impl PackStages {
             started: std::time::Instant::now(),
             frames: 0,
         })
+    }
+
+    /// Forget the targets and bindings: the input picture changed (a pass
+    /// that follows a shader pack, after the pack did).
+    pub fn invalidate(&mut self) {
+        self.targets.clear();
+        self.output = None;
+    }
+    /// The last stage's output, once `run` has made it.
+    pub fn output_view(&self) -> Option<&wgpu::TextureView> {
+        self.targets.last().map(|t| &t.view)
     }
 
     /// Run every stage over the world's `color` and `depth` (`size`) and
@@ -305,13 +329,14 @@ fn declares_override(source: &str, key: &str) -> bool {
 mod tests {
     #[test]
     fn the_frame_uniform_matches_the_prelude() {
-        // 4 matrices and 12 vectors, as `struct Frame` in the prelude.
-        assert_eq!(std::mem::size_of::<super::FrameUniform>(), 4 * 64 + 12 * 16);
+        // 4 matrices, 12 vectors and the mods' 4, as `struct Frame` in the prelude.
+        assert_eq!(std::mem::size_of::<super::FrameUniform>(), 4 * 64 + 16 * 16);
         let prelude = crate::shader_pack::PRELUDE;
         let body = prelude.split("struct Frame {").nth(1).unwrap();
         let body = &body[..body.find('}').unwrap()];
         assert_eq!(body.matches("mat4x4<f32>").count(), 4);
-        assert_eq!(body.matches("vec4<f32>").count(), 12);
+        assert_eq!(body.matches(": vec4<f32>,").count(), 12);
+        assert!(body.contains("mod_params: array<vec4<f32>, 4>,"));
     }
     #[test]
     fn only_declared_overrides_are_passed() {

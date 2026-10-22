@@ -130,6 +130,11 @@ fn atlas_sprites(root: &Path, packed: &[PackedImage]) -> Vec<PackedImage> {
     out
 }
 impl HudAtlas {
+    /// The atlas point of a white texel, for untextured shapes.
+    pub fn white_uv(&self) -> [f32; 2] {
+        let r = self.white;
+        [(r.u0 + r.u1) / 2.0, (r.v0 + r.v1) / 2.0]
+    }
     /// A font glyph's atlas cell (8x8 GUI pixels) and advance.
     pub fn glyph(&self, ch: char) -> Option<(Rect, f32)> {
         let g = self.font.glyph(ch);

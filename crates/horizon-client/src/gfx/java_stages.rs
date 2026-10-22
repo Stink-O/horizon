@@ -237,6 +237,10 @@ pub struct JavaStages {
 }
 
 impl JavaStages {
+    /// The last picture `run` produced, for a pass that follows the pack.
+    pub fn output_view(&self) -> Option<&wgpu::TextureView> {
+        self.bound.as_ref().map(|b| &b.output_view)
+    }
     /// The pipelines of a loaded Java pack, or wgpu's error.
     pub fn new(
         device: &wgpu::Device,

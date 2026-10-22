@@ -382,7 +382,7 @@ fn option(
 
 /// naga parses and validates the stage (prelude included) and checks its
 /// fragment entry point; errors point into the pack's own file.
-fn validate(source: &str, file: &str, entry: &str) -> Result<(), String> {
+pub(crate) fn validate(source: &str, file: &str, entry: &str) -> Result<(), String> {
     let prelude_lines = PRELUDE.lines().count() as u32 + 1;
     let at = |location: Option<naga::SourceLocation>| match location {
         Some(l) if l.line_number > prelude_lines => {

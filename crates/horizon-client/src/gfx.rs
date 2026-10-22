@@ -246,6 +246,18 @@ pub struct Frame<'a> {
     pub menu_blur: Option<f32>,
     /// What a shader pack's `Frame` uniform reads beyond the rest of the frame.
     pub shader: ShaderInputs,
+    /// A mod's post-processing pass (capability `render`), drawn after the
+    /// shader pack.
+    pub mod_post: Option<ModPost<'a>>,
+}
+/// A mod's post pass this frame: a shader-pack stage's source (without the
+/// prelude), a version that changes with it, and the parameters it reads as
+/// `frame.mod_params`.
+#[derive(Clone, Copy)]
+pub struct ModPost<'a> {
+    pub source: &'a str,
+    pub version: u64,
+    pub params: [f32; 16],
 }
 /// A shader pack's view of the game this frame (docs/shader-packs.md, `Frame`).
 #[derive(Clone, Copy, Debug, Default)]
@@ -449,6 +461,8 @@ pub struct Renderer {
     world_post: world_post::Post,
     /// The selected shader pack's stages (Horizon setting; none by default).
     pack: Option<Pack>,
+    /// The mod post pass's version and its pipelines (None: it did not compile).
+    mod_post: Option<(u64, Option<pack_stages::PackStages>)>,
     pub hud: HudRenderer,
     /// The menus' backdrop blur, made on first use.
     post: Option<crate::post::Post>,
@@ -2222,6 +2236,7 @@ impl Renderer {
             occlusion: occlusion::Occlusion::new(crate::chunk::MIN_Y, crate::chunk::HEIGHT / 16),
             world_post,
             pack: None,
+            mod_post: None,
             hud,
             post: None,
             menu_blur: None,
@@ -2633,6 +2648,9 @@ impl Renderer {
     /// vanilla frame). On error the previous pack stays.
     pub fn set_shader_pack(&mut self, pack: Option<&crate::shader_pack::ShaderPack>) -> Result<()> {
         let format = self.config.format.remove_srgb_suffix();
+        if let Some((_, Some(stages))) = &mut self.mod_post {
+            stages.invalidate();
+        }
         self.pack = match pack {
             Some(pack) => Some(match &pack.java {
                 Some(java) => Pack::Java(java_stages::JavaStages::new(
@@ -3512,8 +3530,32 @@ impl Renderer {
         if let Some(timer) = &mut self.gpu_timer {
             timer.begin(&mut encoder);
         }
+        // A mod's post pass, compiled when its source changes.
+        let mod_post = frame.mod_post.filter(|_| !frame.title);
+        if let Some(mp) = &mod_post
+            && self.mod_post.as_ref().is_none_or(|(v, _)| *v != mp.version)
+        {
+            let stage = crate::shader_pack::Stage {
+                kind: crate::shader_pack::StageKind::Composite,
+                file: "mod post pass".into(),
+                source: format!("{}\n{}", crate::shader_pack::PRELUDE, mp.source),
+                entry: "fs_main".into(),
+                scale: 1.0,
+            };
+            let format = self.config.format.remove_srgb_suffix();
+            let built = crate::shader_pack::validate(&stage.source, &stage.file, &stage.entry)
+                .and_then(|()| {
+                    pack_stages::PackStages::from_stages(&self.device, format, "mod", &[stage], &[])
+                });
+            if let Err(e) = &built {
+                log::warn!("Horizon: a mod's post pass did not compile: {e}");
+            }
+            self.mod_post = Some((mp.version, built.ok()));
+        }
+        let mod_post =
+            mod_post.filter(|_| self.mod_post.as_ref().is_some_and(|(_, s)| s.is_some()));
         // The world's targets: the screen, or the scaled target of `post`.
-        let pack = self.pack.is_some() && !frame.title;
+        let pack = (self.pack.is_some() || mod_post.is_some()) && !frame.title;
         let scaled =
             self.world_post
                 .prepare(&self.device, [self.config.width, self.config.height], pack);
@@ -3794,7 +3836,66 @@ impl Renderer {
                 );
             }
         }
-        if let (true, Some((color, depth)), Some(size), Some(stages)) =
+        if let (true, Some((color, depth)), Some(size), Some(mp), Some((_, Some(mod_stages)))) = (
+            pack,
+            &scaled,
+            self.world_post.size(),
+            mod_post,
+            self.mod_post.as_mut(),
+        ) {
+            // The shader pack first (if any), then the mod's pass over its picture.
+            let input = match self.pack.as_mut() {
+                Some(Pack::Horizon(stages)) => {
+                    stages.run(
+                        &self.device,
+                        &self.queue,
+                        &mut encoder,
+                        color,
+                        depth,
+                        size,
+                        &self.world_post,
+                        pack_uniform,
+                    );
+                    stages.output_view()
+                }
+                Some(Pack::Java(stages)) => {
+                    stages.run(
+                        &self.device,
+                        &self.queue,
+                        &mut encoder,
+                        color,
+                        depth,
+                        size,
+                        &self.world_post,
+                        pack_uniform,
+                        java_stages::JavaFrame {
+                            eye_light: frame.shader.eye_light,
+                            sun_angle: frame.sky.sun_angle,
+                            moon_angle: frame.sky.moon_angle,
+                        },
+                    );
+                    stages.output_view()
+                }
+                None => None,
+            }
+            .unwrap_or(color);
+            let mut uniform = pack_uniform;
+            for (i, v) in mp.params.chunks(4).enumerate() {
+                uniform.mod_params[i].copy_from_slice(v);
+            }
+            let output = mod_stages.run(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                input,
+                depth,
+                size,
+                &self.world_post,
+                uniform,
+            );
+            self.world_post
+                .finish_with(&mut encoder, &view_target, output);
+        } else if let (true, Some((color, depth)), Some(size), Some(stages)) =
             (pack, &scaled, self.world_post.size(), self.pack.as_mut())
         {
             let output = match stages {

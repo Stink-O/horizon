@@ -68,14 +68,26 @@ pub enum Capability {
     /// New blocks and items from the mod's `data/` (API 0.2): no WIT
     /// interface, the game reads them before the world loads.
     Registries,
+    /// Item use it claims, keybinds and clicks on its screen.
+    Input,
+    /// A screen of its own.
+    Ui,
+    /// A post-processing pass over the world.
+    Render,
+    /// Raycasts, commands at operator level and sounds in the world.
+    World,
 }
 impl Capability {
-    pub const ALL: [Capability; 5] = [
+    pub const ALL: [Capability; 9] = [
         Capability::GameRead,
         Capability::Chat,
         Capability::Hud,
         Capability::Storage,
         Capability::Registries,
+        Capability::Input,
+        Capability::Ui,
+        Capability::Render,
+        Capability::World,
     ];
     /// The WIT interface it grants, in `horizon:mods`.
     pub fn interface(self) -> &'static str {
@@ -85,6 +97,10 @@ impl Capability {
             Capability::Hud => "hud",
             Capability::Storage => "storage",
             Capability::Registries => "registries",
+            Capability::Input => "input",
+            Capability::Ui => "ui",
+            Capability::Render => "render",
+            Capability::World => "world",
         }
     }
     /// What the player reads before turning the mod on: "May <this>".
@@ -95,6 +111,12 @@ impl Capability {
             Capability::Hud => "draw text on your screen",
             Capability::Storage => "save its own settings to disk",
             Capability::Registries => "add blocks and items to your worlds",
+            Capability::Input => "react to its items, its keys and clicks on its screen",
+            Capability::Ui => "open a screen of its own",
+            Capability::Render => "draw effects over the world",
+            Capability::World => {
+                "change the world you play in as an operator would, and play sounds"
+            }
         }
     }
     /// The capability a component import needs, `Ok(None)` for one every
@@ -125,6 +147,10 @@ impl fmt::Display for Capability {
             Capability::Hud => "hud",
             Capability::Storage => "storage",
             Capability::Registries => "registries",
+            Capability::Input => "input",
+            Capability::Ui => "ui",
+            Capability::Render => "render",
+            Capability::World => "world",
         };
         f.write_str(name)
     }
@@ -351,6 +377,23 @@ capabilities = ["game-read", "hud"]
         let with_storage = EXAMPLE.replace("\"hud\"", "\"hud\", \"storage\"");
         let m = Manifest::parse(&with_storage).unwrap();
         assert_eq!(m.check_imports(["horizon:mods/storage@0.1.0"]), Ok(()));
+        for (interface, capability) in [
+            ("input", "input"),
+            ("ui", "ui"),
+            ("render", "render"),
+            ("world", "world"),
+        ] {
+            let import = format!("horizon:mods/{interface}@0.1.0");
+            assert_eq!(
+                m.check_imports([import.as_str()]),
+                Err(format!(
+                    "uses capability {capability}, missing from horizon-mod.toml"
+                ))
+            );
+            let with = EXAMPLE.replace("\"hud\"", &format!("\"hud\", \"{capability}\""));
+            let granted = Manifest::parse(&with).unwrap();
+            assert_eq!(granted.check_imports([import.as_str()]), Ok(()));
+        }
     }
 
     #[test]

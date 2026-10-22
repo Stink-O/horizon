@@ -84,6 +84,10 @@ folder, loads no runtime and plays exactly like vanilla 26.3.
 | `chat` | `chat` | `show(text)`: a line only the local player sees, after the mod's name (8 per call) |
 | `hud` | `hud` | `set-panel(corner, lines)`, `clear()`: up to 16 lines of 256 characters |
 | `storage` | `storage` | `get(key)`, `set(key, value)`, `delete(key)`: a per-mod folder of up to 64 files, 4 MiB total, at most 1 MiB written per call |
+| `input` | `input` | `claim-items(ids)`: right-clicks with those items are the mod's (`use-start`, `use-stop` with the ticks held; no zoom, placing or swing); `register-key(name, key)`; `held()`; `poll()`: the events since the last call (at most 256 kept) |
+| `ui` | `ui` | `show(draws)`: opens the mod's screen (or redraws it) from fills, quads, sprites, items and text in GUI pixels from the centre, up to 4096; `close()`; `cursor()`. Clicks and Escape come back as `input` events; the screen does not pause |
+| `render` | `render` | `set-post(wgsl)`: a post-processing pass in the shader-pack stage format, drawn after the shader pack if one is on; `set-params(16 floats)`, read as `frame.mod_params`; `clear-post()` |
+| `world` | `world` | `raycast(distance)`: the first block along the view, up to 256 blocks; `run-commands(list)`: at operator level, silently, this tick (up to 8192 per call; single player and LAN hosts only); `play-sound(event, at, volume, pitch)` |
 
 | Hook (export) | When |
 |---|---|
@@ -98,6 +102,12 @@ it (logged), and two mods cannot share a name (the first one loaded keeps it).
 The chat box colours and Tab-completes a mod's commands like vanilla's, for
 every player whatever their permission level, and takes any text after the
 name (the mod reads it as `args`; API 0.1 has no way to declare argument types).
+
+New hooks arrive as events a mod pulls (`input.poll`), not as new exports:
+a component built before an interface existed never imports it and loads
+unchanged. The game decides when a mod's item use, screen and commands apply
+(the use goes to the mod that claimed the item; a screen opens only over
+gameplay; commands need a world this game runs).
 
 ### Planned interfaces
 

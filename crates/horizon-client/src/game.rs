@@ -459,6 +459,8 @@ enum Screen {
     WorldOptions,
     /// CommandBlockEditScreen (game/command_blocks.rs).
     CommandBlock,
+    /// A mod's own screen (capability `ui`, game/mods.rs).
+    Mod,
 }
 struct Mining {
     pos: [i32; 3],
@@ -3218,6 +3220,10 @@ impl Game<'_> {
     /// One hand's turn in `startUseItem`: `useItemOn` the block aimed at,
     /// then `useItem`. Whether the click ends here (it acted or failed).
     fn use_hand(&mut self, block_hit: Option<&Hit>) -> Result<bool> {
+        // An item a mod claims (capability `input`): its use is the mod's.
+        if self.mod_use_start() {
+            return Ok(true);
+        }
         // isSecondaryUseActive with something in either hand keeps blocks
         // from reacting.
         let sneaking = self.keys.contains(&KeyCode::ShiftLeft);
@@ -3574,7 +3580,11 @@ impl Game<'_> {
         };
         // Switching hotbar slots only ends a main-hand use.
         let hand_changed = slot != self.selected && slot != shield::OFFHAND_SLOT;
-        if !self.right || hand_changed || self.screen != Screen::Playing {
+        let released = !self.right || hand_changed || self.screen != Screen::Playing;
+        if self.mod_use_tick(slot, ticks, released) {
+            return;
+        }
+        if released {
             if &*stack.item == "minecraft:bow" && !hand_changed {
                 self.release_bow(ticks);
             }
@@ -4873,6 +4883,7 @@ impl Game<'_> {
                 );
             }
             Screen::GameModeSwitcher => self.draw_gamemode_switcher(&mut batch),
+            Screen::Mod => self.draw_mod_screen(&mut batch),
             Screen::Dead => self.draw_death_screen(&mut batch),
             Screen::Stats => self.draw_stats(&mut batch),
             Screen::Advancements => self.draw_advancements(&mut batch),
@@ -9861,10 +9872,16 @@ impl Game<'_> {
         } else {
             self.gather_dynamic_lights(camera, alpha);
         }
+        let mod_post = self.mods.mods.post();
         let frame = Frame {
             weather: &weather,
             weather_time: horizon_client::weather::Time::new(self.world.game_time, alpha as f32),
             shader: self.shader_inputs(camera, alpha as f32),
+            mod_post: mod_post.as_ref().map(|p| horizon_client::gfx::ModPost {
+                source: &p.source,
+                version: p.version,
+                params: p.params,
+            }),
             nether_lighting: self.dim == Dim::Nether,
             camera,
             yaw,
@@ -10129,6 +10146,7 @@ impl Game<'_> {
                     self.capture(true);
                 }
                 Screen::GameModeSwitcher => self.close_gamemode_switcher(false),
+                Screen::Mod => self.close_mod_screen(),
                 Screen::Dead => {}
                 Screen::Stats => self.screen = Screen::Paused,
                 Screen::Advancements => self.close_advancements(),
@@ -10963,6 +10981,7 @@ impl ApplicationHandler for Game<'_> {
                             self.loom_release();
                         }
                         Screen::Chat if pressed && button == MouseButton::Left => self.chat_click(),
+                        Screen::Mod if pressed => self.mod_screen_click(button),
                         Screen::Creative if pressed => {
                             self.click_creative(button == MouseButton::Right);
                         }
@@ -11127,6 +11146,7 @@ impl ApplicationHandler for Game<'_> {
                         return Ok(());
                     };
                     self.extras_key(key, event.state == ElementState::Pressed, event.repeat);
+                    self.mods_key(key, event.state == ElementState::Pressed, event.repeat);
                     // key.smoothCamera toggles the cinematic camera.
                     if self.screen == Screen::Playing
                         && event.state == ElementState::Pressed
@@ -12437,6 +12457,7 @@ fn loading_frame(hud: &HudBatch) -> Frame<'_> {
         post: None,
         menu_blur: None,
         shader: Default::default(),
+        mod_post: None,
     }
 }
 

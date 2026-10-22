@@ -18,6 +18,9 @@ struct Frame {
     camera_state: vec4<f32>,
     view_params: vec4<f32>,
     dimension: vec4<f32>,
+    /// Sixteen floats a mod's post pass is given (capability `render`);
+    /// zero in a shader pack's own stages.
+    mod_params: array<vec4<f32>, 4>,
 }
 @group(0) @binding(0) var scene_color: texture_2d<f32>;
 @group(0) @binding(1) var scene_depth: texture_depth_2d;

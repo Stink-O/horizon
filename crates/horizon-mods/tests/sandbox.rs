@@ -78,6 +78,7 @@ fn player() -> Snapshot {
             game_time: 100,
             day_time: 24000 + 6000,
         }),
+        ..Default::default()
     }
 }
 

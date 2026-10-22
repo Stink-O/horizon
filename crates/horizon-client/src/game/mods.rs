@@ -2,20 +2,24 @@
 //! their tick, frame, chat and command hooks, their HUD panels and what
 //! they print. With no mod on, `horizon_mods::Mods` holds no engine and
 //! every hook here returns after one check.
-use super::{Game, Screen};
+use super::{Game, ItemStack, Screen};
 use horizon_client::{
     command::{Dispatcher, vanilla},
     extras::Corner,
     extras_hud::{self, Corners},
-    hud::HudBatch,
+    hud::{HudBatch, rgba},
+    keybinds,
     mod_list::{self, Installed},
     text::{self, Text},
 };
-use horizon_mods::{Clock, Mods, Output, Player, Snapshot, Status};
+use horizon_mods::{
+    Click, Clock, Draw, HeldItem, Hit, InputEvent, ItemUse, Mods, Output, Player, Snapshot, Status,
+};
 use std::{
     path::PathBuf,
     time::{Duration, Instant},
 };
+use winit::{event::MouseButton, keyboard::KeyCode};
 
 #[derive(Default)]
 pub(super) struct ModsState {
@@ -26,6 +30,10 @@ pub(super) struct ModsState {
     checked: Option<Instant>,
     /// The chat's command tree while a running mod owns commands.
     tree: Option<Dispatcher>,
+    /// The mod whose screen is open (`Screen::Mod`).
+    pub(super) screen: Option<String>,
+    /// The mod claiming the item in use (`Game.using`), for its `use-stop`.
+    pub(super) using: Option<String>,
 }
 impl ModsState {
     /// The chat's command tree: vanilla's, plus the running mods' commands.
@@ -222,7 +230,49 @@ impl Game<'_> {
             game_time: self.world.game_time.max(0) as u64,
             day_time: self.world.day_time.max(0) as u64,
         });
-        Snapshot { player, clock }
+        let held = player.as_ref().and(self.mod_held(self.selected));
+        let view_hit = player.as_ref().and_then(|_| {
+            let eye = self.eye_position()?;
+            let dir = super::view_vector(self.yaw, self.pitch);
+            let hit = self.clip_ray(eye, dir, f64::from(horizon_mods::RAYCAST_MAX))?;
+            let state = self.world.block(hit.pos[0], hit.pos[1], hit.pos[2]);
+            let distance = (0..3)
+                .map(|i| (hit.point[i] - eye[i]).powi(2))
+                .sum::<f64>()
+                .sqrt();
+            Some((
+                distance as f32,
+                Hit {
+                    block_x: hit.pos[0],
+                    block_y: hit.pos[1],
+                    block_z: hit.pos[2],
+                    x: hit.point[0],
+                    y: hit.point[1],
+                    z: hit.point[2],
+                    block: self.res.facts().get(state).name.to_string(),
+                },
+            ))
+        });
+        Snapshot {
+            player,
+            clock,
+            held,
+            view_hit,
+        }
+    }
+    /// The stack in inventory slot `slot` as mods see it.
+    fn mod_held(&self, slot: usize) -> Option<HeldItem> {
+        let stack = self.stack_in(slot)?;
+        let extra = stack.extra.as_deref();
+        Some(HeldItem {
+            id: stack.item.to_string(),
+            count: stack.count,
+            slot: slot as u32,
+            custom_name: extra.and_then(|e| e.custom_name.clone()),
+            custom_data: extra
+                .and_then(|e| e.other("minecraft:custom_data"))
+                .map(horizon_client::snbt::to_snbt),
+        })
     }
     /// A game tick.
     pub(super) fn tick_mods(&mut self) {
@@ -252,6 +302,18 @@ impl Game<'_> {
         if !self.mods.mods.is_running() {
             return;
         }
+        let cursor = (self.screen == Screen::Mod).then(|| {
+            let size = self
+                .renderer
+                .as_ref()
+                .map_or([1, 1], |r| [r.config.width, r.config.height]);
+            let b = HudBatch::new(size);
+            (
+                self.cursor.0 - b.width / 2.0,
+                self.cursor.1 - b.height / 2.0,
+            )
+        });
+        self.mods.mods.set_cursor(cursor);
         self.mods.mods.frame(elapsed.as_secs_f32());
         self.show_mod_output();
     }
@@ -274,10 +336,38 @@ impl Game<'_> {
         self.mods.mods.chat(line);
         self.show_mod_output();
     }
-    /// Chat lines, command feedback and stopped mods, into the chat.
+    /// Chat lines, command feedback and stopped mods, into the chat; the
+    /// screens, commands and sounds mods asked for.
     fn show_mod_output(&mut self) {
         for output in self.mods.mods.drain() {
             let line = match output {
+                Output::Screen { id, open: true } => {
+                    self.open_mod_screen(id);
+                    continue;
+                }
+                Output::Screen { id, open: false } => {
+                    if self.mods.screen.as_deref() == Some(id.as_str()) {
+                        self.mods.screen = None;
+                        if self.screen == Screen::Mod {
+                            self.screen = Screen::Playing;
+                            self.capture(true);
+                        }
+                    }
+                    continue;
+                }
+                Output::Commands { id, commands } => {
+                    self.run_mod_commands(&id, commands);
+                    continue;
+                }
+                Output::Sound {
+                    event,
+                    at,
+                    volume,
+                    pitch,
+                } => {
+                    self.audio.play(&event, at, volume, pitch);
+                    continue;
+                }
                 Output::Chat { name, text } => {
                     let mut line = Text::literal(format!("[{name}] ")).with_color(text::GRAY);
                     line.push(Text::literal(text));
@@ -318,5 +408,219 @@ impl Game<'_> {
                 .collect();
             extras_hud::draw_lines(batch, &self.gui.atlas, corners, corner, &lines);
         }
+    }
+}
+
+impl Game<'_> {
+    // ---- capability `input` ------------------------------------------------
+
+    /// `use_hand`: a right-click with an item a mod claims starts its use for
+    /// that mod and nothing else happens. True when a mod took it.
+    pub(super) fn mod_use_start(&mut self) -> bool {
+        if !self.mods.mods.is_running() || self.guest_use.is_some() || self.using.is_some() {
+            return false;
+        }
+        let slot = self.held_slot();
+        let Some(item) = self.mod_held(slot) else {
+            return false;
+        };
+        let Some(id) = self.mods.mods.claimant(&item.id).map(str::to_owned) else {
+            return false;
+        };
+        self.using = Some((slot, 0));
+        self.mods
+            .mods
+            .push_event(&id, InputEvent::UseStart(ItemUse { item, ticks: 0 }));
+        self.mods.using = Some(id);
+        true
+    }
+    /// `tick_used_item` for a claimed item: counts the ticks held and ends
+    /// the use when the button comes up. True when the item in use is one.
+    pub(super) fn mod_use_tick(&mut self, slot: usize, ticks: u32, released: bool) -> bool {
+        let Some(id) = self.mods.using.clone() else {
+            return false;
+        };
+        let still_claimed = self
+            .stack_in(slot)
+            .is_some_and(|s| self.mods.mods.claimant(&s.item) == Some(id.as_str()));
+        if released || !still_claimed {
+            if let Some(item) = self.mod_held(slot) {
+                self.mods
+                    .mods
+                    .push_event(&id, InputEvent::UseStop(ItemUse { item, ticks }));
+            }
+            self.mods.using = None;
+            self.using = None;
+        } else {
+            self.using = Some((slot, ticks + 1));
+        }
+        true
+    }
+    /// A key went down or up: the mods' binds on it, while playing.
+    pub(super) fn mods_key(&mut self, key: KeyCode, pressed: bool, repeat: bool) {
+        if repeat
+            || !self.mods.mods.is_running()
+            || self.screen != Screen::Playing
+            || self.title.is_some()
+        {
+            return;
+        }
+        let Some(name) = keybinds::key_name(key) else {
+            return;
+        };
+        for (id, bind) in self.mods.mods.keys_on(name) {
+            let event = if pressed {
+                InputEvent::KeyDown(bind)
+            } else {
+                InputEvent::KeyUp(bind)
+            };
+            self.mods.mods.push_event(&id, event);
+        }
+    }
+
+    // ---- capability `ui` ---------------------------------------------------
+
+    fn open_mod_screen(&mut self, id: String) {
+        if self.screen != Screen::Playing && self.screen != Screen::Mod {
+            // Another screen is up: the mod's opens later, if it asks again.
+            self.mods.mods.screen_closed(&id);
+            return;
+        }
+        if self.screen == Screen::Mod
+            && let Some(other) = self.mods.screen.replace(id.clone())
+            && other != id
+        {
+            self.mods.mods.screen_closed(&other);
+        }
+        self.mods.screen = Some(id);
+        if self.screen != Screen::Mod {
+            self.screen = Screen::Mod;
+            self.keys.clear();
+            self.left = false;
+            self.right = false;
+            self.mining = None;
+            self.capture(false);
+        }
+    }
+    /// Escape on a mod's screen.
+    pub(super) fn close_mod_screen(&mut self) {
+        if let Some(id) = self.mods.screen.take() {
+            self.mods.mods.screen_closed(&id);
+        }
+        self.screen = Screen::Playing;
+        self.capture(true);
+    }
+    pub(super) fn mod_screen_click(&mut self, button: MouseButton) {
+        let Some(id) = self.mods.screen.clone() else {
+            return;
+        };
+        let size = self
+            .renderer
+            .as_ref()
+            .map_or([1, 1], |r| [r.config.width, r.config.height]);
+        let b = HudBatch::new(size);
+        let button = match button {
+            MouseButton::Left => 0,
+            MouseButton::Right => 1,
+            MouseButton::Middle => 2,
+            _ => return,
+        };
+        let click = Click {
+            x: self.cursor.0 - b.width / 2.0,
+            y: self.cursor.1 - b.height / 2.0,
+            button,
+        };
+        self.mods
+            .mods
+            .push_event(&id, InputEvent::ScreenClick(click));
+    }
+    pub(super) fn draw_mod_screen(&self, batch: &mut HudBatch) {
+        let Some(draws) = self
+            .mods
+            .screen
+            .as_deref()
+            .and_then(|id| self.mods.mods.screen(id))
+        else {
+            return;
+        };
+        let (cx, cy) = (batch.width / 2.0, batch.height / 2.0);
+        let argb = |c: u32| {
+            let [a, r, g, b] = c.to_be_bytes();
+            rgba(r, g, b, a)
+        };
+        let atlas = &self.gui.atlas;
+        for draw in draws {
+            match draw {
+                Draw::Fill((r, color)) => {
+                    batch.fill(atlas, cx + r.x, cy + r.y, r.w, r.h, argb(*color))
+                }
+                Draw::Quad((points, color)) if points.len() >= 4 => {
+                    let p = std::array::from_fn(|i| [cx + points[i].x, cy + points[i].y]);
+                    batch.quad(p, [atlas.white_uv(); 4], argb(*color));
+                }
+                Draw::Quad(_) => {}
+                Draw::Sprite((name, r, color)) => {
+                    batch.sprite_scaled(atlas, name, cx + r.x, cy + r.y, r.w, r.h, argb(*color));
+                }
+                Draw::Item((item, model, at, scale)) => {
+                    let mut stack = ItemStack::new(item, 1);
+                    if !model.is_empty() {
+                        let mut data = horizon_client::item_data::StackData::default();
+                        data.set_other(
+                            "minecraft:item_model",
+                            Some(horizon_world::nbt::Tag::String(model.as_str().into())),
+                        );
+                        stack.extra = Some(Box::new(data));
+                    }
+                    let start = batch.vertices.len();
+                    let (x, y) = (cx + at.x, cy + at.y);
+                    self.draw_item_model(batch, &stack, x, y);
+                    if (*scale - 1.0).abs() > 1e-3 {
+                        batch.scale_since(start, x, y, *scale, *scale);
+                    }
+                }
+                Draw::Text((text, at, color, centred)) => {
+                    let [_, r, g, b] = color.to_be_bytes();
+                    let x = if *centred {
+                        cx + at.x - (HudBatch::text_width(atlas, text) / 2.0).floor()
+                    } else {
+                        cx + at.x
+                    };
+                    batch.text(atlas, text, x, cy + at.y, rgba(r, g, b, 255), true);
+                }
+            }
+        }
+    }
+
+    // ---- capability `world` ------------------------------------------------
+
+    /// `world.run-commands`: at operator level, silently, in order.
+    fn run_mod_commands(&mut self, id: &str, commands: Vec<String>) {
+        if self.remote.is_some() {
+            log::warn!("[mod {id}] run-commands ignored: the world is on a remote server");
+            return;
+        }
+        if let Some(server) = &self.integrated {
+            server.call(move |g| g.run_commands_silently(&commands));
+            return;
+        }
+        self.run_commands_silently(&commands);
+    }
+    fn run_commands_silently(&mut self, commands: &[String]) {
+        // Its own command budget: a mod's batch is not the tick's functions.
+        let saved = std::mem::take(&mut self.exec);
+        self.as_console(|g| {
+            for line in commands {
+                let source = super::commands::execute::Source {
+                    silent: true,
+                    ..g.player_source()
+                };
+                g.exec = Default::default();
+                if let Err(e) = g.execute_line(line.trim_start_matches('/'), source) {
+                    log::debug!("mod command {line:?} failed: {e:?}");
+                }
+            }
+        });
+        self.exec = saved;
     }
 }
