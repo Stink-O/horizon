@@ -355,6 +355,10 @@ impl Game<'_> {
                     }
                     continue;
                 }
+                Output::Keys => {
+                    self.sync_mod_keys();
+                    continue;
+                }
                 Output::Commands { id, commands } => {
                     self.run_mod_commands(&id, commands);
                     continue;
@@ -456,7 +460,17 @@ impl Game<'_> {
         }
         true
     }
-    /// A key went down or up: the mods' binds on it, while playing.
+    /// The running mods' keybinds into Controls (`key.<mod id>.<name>`).
+    fn sync_mod_keys(&mut self) {
+        for k in self.mods.mods.keys() {
+            let name = format!("key.{}.{}", k.mod_id, k.name);
+            self.settings
+                .keys
+                .register_mod_key(&name, &k.label, &k.mod_name, &k.key);
+        }
+    }
+    /// A key went down or up: the mods' binds on it (as the player bound
+    /// them in Controls), while playing.
     pub(super) fn mods_key(&mut self, key: KeyCode, pressed: bool, repeat: bool) {
         if repeat
             || !self.mods.mods.is_running()
@@ -465,16 +479,20 @@ impl Game<'_> {
         {
             return;
         }
-        let Some(name) = keybinds::key_name(key) else {
+        let Some(pressed_name) = keybinds::key_name(key) else {
             return;
         };
-        for (id, bind) in self.mods.mods.keys_on(name) {
+        for k in self.mods.mods.keys() {
+            let name = format!("key.{}.{}", k.mod_id, k.name);
+            if self.settings.keys.get(&name) != pressed_name {
+                continue;
+            }
             let event = if pressed {
-                InputEvent::KeyDown(bind)
+                InputEvent::KeyDown(k.name)
             } else {
-                InputEvent::KeyUp(bind)
+                InputEvent::KeyUp(k.name)
             };
-            self.mods.mods.push_event(&id, event);
+            self.mods.mods.push_event(&k.mod_id, event);
         }
     }
 

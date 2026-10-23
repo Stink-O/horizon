@@ -21,6 +21,9 @@ pub struct Post {
     pub scale: f32,
     pub antialias: bool,
     target: Option<WorldTarget>,
+    /// Bumped each time the world's target is made anew: bindings of the old
+    /// one (shader pack stages, a mod's pass) must be made again.
+    generation: u64,
 }
 
 impl Post {
@@ -97,6 +100,7 @@ impl Post {
             scale: 1.0,
             antialias: false,
             target: None,
+            generation: 0,
         }
     }
     /// The world's colour and depth targets this frame, or `None` to draw
@@ -143,6 +147,7 @@ impl Post {
                 wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             );
             let group = self.bind(device, &color);
+            self.generation += 1;
             self.target = Some(WorldTarget {
                 size,
                 color,
@@ -155,6 +160,10 @@ impl Post {
             .map(|t| (t.color.clone(), t.depth.clone()))
     }
     /// The world target's size, once `prepare` made one.
+    /// Changes whenever the world's target is made anew.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
     pub fn size(&self) -> Option<[u32; 2]> {
         self.target.as_ref().map(|t| t.size)
     }

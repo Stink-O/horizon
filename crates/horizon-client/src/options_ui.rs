@@ -7,7 +7,7 @@ use std::time::Instant;
 use crate::{
     gamepad::{self, GlyphStyle},
     hud::{HudAtlas, HudBatch, rgba},
-    keybinds::{self, CATEGORIES, KeyBinds, MAPPINGS},
+    keybinds::{self, CATEGORIES, MAPPINGS},
     lang::{self, LanguageInfo},
     settings::{SOUND_SOURCES, Settings},
     text::{self, Style, Text},
@@ -1606,33 +1606,59 @@ impl OptionsUi {
                     },
                     list: false,
                 });
-                let mut mappings: Vec<(&str, &str)> =
-                    MAPPINGS.iter().map(|(n, _, c)| (*n, *c)).collect();
+                // (name, label, category, a mod's): vanilla's by category, then
+                // each mod's keybinds under the mod's name (capability `input`).
+                let mut mappings: Vec<(&'static str, String, String, bool)> = MAPPINGS
+                    .iter()
+                    .map(|(n, _, c)| (*n, lang::get(n), (*c).to_owned(), false))
+                    .chain(
+                        s.keys
+                            .mod_keys()
+                            .iter()
+                            .map(|m| (m.name, m.label.clone(), m.category.clone(), true)),
+                    )
+                    .collect();
                 let query = self.settings_search.value.to_lowercase();
-                mappings.retain(|(name, _)| {
-                    query.is_empty() || lang::get(name).to_lowercase().contains(&query)
+                mappings.retain(|(_, label, _, _)| {
+                    query.is_empty() || label.to_lowercase().contains(&query)
                 });
                 mappings.sort_by(|a, b| {
-                    let ca = CATEGORIES.iter().position(|c| *c == a.1).unwrap_or(99);
-                    let cb = CATEGORIES.iter().position(|c| *c == b.1).unwrap_or(99);
-                    ca.cmp(&cb)
-                        .then_with(|| lang::get(a.0).cmp(&lang::get(b.0)))
+                    let rank = |m: &(&str, String, String, bool)| {
+                        if m.3 {
+                            99
+                        } else {
+                            CATEGORIES.iter().position(|c| *c == m.2).unwrap_or(98)
+                        }
+                    };
+                    rank(a)
+                        .cmp(&rank(b))
+                        .then_with(|| a.2.cmp(&b.2))
+                        .then_with(|| {
+                            if a.3 {
+                                std::cmp::Ordering::Equal
+                            } else {
+                                a.1.cmp(&b.1)
+                            }
+                        })
                 });
                 let row_left = cx - 170.0;
                 let scrollbar_x = row_left + 340.0 + 6.0 + 2.0;
                 let list_start = out.len();
                 let mut y = top + 2.0 - self.scroll;
-                let mut last_category = "";
-                for (name, category) in mappings {
+                let mut last_category = String::new();
+                for (name, row_label, category, from_mod) in mappings {
                     if category != last_category {
-                        last_category = category;
-                        let label =
+                        last_category = category.clone();
+                        let heading = if from_mod {
+                            Text::literal(category.clone())
+                        } else {
                             Text::translate(&format!("key.category.minecraft.{category}"), &[])
-                                .with_style(&Style {
-                                    bold: Some(true),
-                                    underlined: Some(true),
-                                    ..Style::default()
-                                });
+                        };
+                        let label = heading.with_style(&Style {
+                            bold: Some(true),
+                            underlined: Some(true),
+                            ..Style::default()
+                        });
                         out.push(Widget {
                             x: 0.0,
                             y: y + 7.0,
@@ -1653,7 +1679,7 @@ impl OptionsUi {
                         w: 200.0,
                         h: 9.0,
                         kind: WKind::Text {
-                            text: tr(name),
+                            text: Text::literal(row_label),
                             color: u32::MAX,
                             centered: false,
                         },
@@ -1680,7 +1706,7 @@ impl OptionsUi {
                     }
                     let reset_x = scrollbar_x - 50.0 - 10.0;
                     let change_x = reset_x - 5.0 - 75.0;
-                    let name_static = MAPPINGS.iter().find(|m| m.0 == name).map_or("", |m| m.0);
+                    let name_static = name;
                     out.push(button(change_x, y, 75.0, message, Act::Key(name_static)));
                     if !conflicts.is_empty() {
                         out.push(Widget {
@@ -2454,7 +2480,8 @@ impl OptionsUi {
                         }
                         Act::Key(name) => self.selected_key = Some(name),
                         Act::ResetKey(name) => {
-                            s.keys.set(name, KeyBinds::default_of(name));
+                            let default = s.keys.default_for(name).to_owned();
+                            s.keys.set(name, &default);
                             events.push(Event::Changed);
                         }
                         Act::ResetKeys => {

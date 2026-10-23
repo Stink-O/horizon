@@ -122,9 +122,11 @@ interface input {
     /// Items whose use the mod handles instead of the game, by id. Replaces
     /// the previous list.
     claim-items: func(ids: list<string>);
-    /// A keybind: `name` is the mod's own (it comes back in `key-down`),
-    /// `key` a key name as options.txt writes them (`key.keyboard.r`).
-    register-key: func(name: string, key: string);
+    /// A keybind, listed in Options > Controls under the mod's name, where
+    /// the player can rebind it: `name` is the mod's own (it comes back in
+    /// `key-down`), `label` what Controls shows, `key` the default as
+    /// options.txt writes keys (`key.keyboard.r`).
+    register-key: func(name: string, label: string, key: string);
     /// The stack in the main hand, as of this tick.
     held: func() -> option<held-item>;
     /// The events since the last call, oldest first (at most 256 are kept).

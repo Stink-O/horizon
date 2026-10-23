@@ -53,6 +53,8 @@ pub struct PackStages {
     /// `world_post`'s bindings of the last stage's output.
     output: Option<wgpu::BindGroup>,
     world_size: [u32; 2],
+    /// The world target (`Post::generation`) the bindings read.
+    world_generation: u64,
     started: std::time::Instant,
     frames: u32,
 }
@@ -194,6 +196,7 @@ impl PackStages {
             targets: Vec::new(),
             output: None,
             world_size: [0, 0],
+            world_generation: u64::MAX,
             started: std::time::Instant::now(),
             frames: 0,
         })
@@ -224,8 +227,12 @@ impl PackStages {
         post: &super::world_post::Post,
         mut uniform: FrameUniform,
     ) -> &wgpu::BindGroup {
-        if self.world_size != size || self.targets.len() != self.passes.len() {
+        if self.world_size != size
+            || self.targets.len() != self.passes.len()
+            || self.world_generation != post.generation()
+        {
             self.world_size = size;
+            self.world_generation = post.generation();
             self.targets.clear();
             for pass in &self.passes {
                 let target_size = size.map(|v| ((v as f32 * pass.scale).round() as u32).max(1));

@@ -260,10 +260,28 @@ pub fn display_name(key: &str) -> Text {
     Text::translate(key, &[])
 }
 
+/// A keybind a mod registered (capability `input`): listed in Controls under
+/// the mod's name, rebound and saved like vanilla's (in `MOD_KEYS_FILE`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModKey {
+    /// `key.<mod id>.<bind>`.
+    pub name: &'static str,
+    pub label: String,
+    /// The mod's name, its category in Controls.
+    pub category: String,
+    pub default: String,
+}
+/// Mod keybinds' saved keys, beside options.txt: `key_<name>:<key>` lines.
+pub const MOD_KEYS_FILE: &str = "horizon-mod-keys.txt";
+
 /// Current bindings by mapping name.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeyBinds {
     keys: BTreeMap<&'static str, String>,
+    /// Mods' keybinds, in registration order.
+    mods: Vec<ModKey>,
+    /// Saved mod keybinds, including mods not running now (kept on save).
+    saved_mods: BTreeMap<String, String>,
 }
 impl Default for KeyBinds {
     fn default() -> Self {
@@ -272,6 +290,8 @@ impl Default for KeyBinds {
                 .iter()
                 .map(|(n, d, _)| (*n, (*d).to_owned()))
                 .collect(),
+            mods: Vec::new(),
+            saved_mods: BTreeMap::new(),
         }
     }
 }
@@ -287,13 +307,91 @@ impl KeyBinds {
             .find(|m| m.0 == name)
             .map_or("key.keyboard.unknown", |m| m.1)
     }
+    /// A vanilla or mod mapping's default key.
+    pub fn default_for(&self, name: &str) -> &str {
+        match self.mods.iter().find(|m| m.name == name) {
+            Some(m) => &m.default,
+            None => Self::default_of(name),
+        }
+    }
     pub fn is_default(&self, name: &str) -> bool {
-        self.get(name) == Self::default_of(name)
+        self.get(name) == self.default_for(name)
     }
     pub fn set(&mut self, name: &str, key: &str) {
         if let Some((n, _, _)) = MAPPINGS.iter().find(|m| m.0 == name) {
             self.keys.insert(n, key.to_owned());
+        } else if let Some(m) = self.mods.iter().find(|m| m.name == name) {
+            self.keys.insert(m.name, key.to_owned());
+            self.saved_mods.insert(m.name.to_owned(), key.to_owned());
         }
+    }
+    /// Every mapping's name: vanilla's, then the mods'.
+    pub fn names(&self) -> impl Iterator<Item = &'static str> + '_ {
+        MAPPINGS
+            .iter()
+            .map(|m| m.0)
+            .chain(self.mods.iter().map(|m| m.name))
+    }
+    pub fn mod_keys(&self) -> &[ModKey] {
+        &self.mods
+    }
+    /// A mod's keybind (`key.<mod id>.<bind>`): bound to its saved key, or
+    /// `default`. Registering it again updates its label and default.
+    pub fn register_mod_key(&mut self, name: &str, label: &str, category: &str, default: &str) {
+        if let Some(m) = self.mods.iter_mut().find(|m| m.name == name) {
+            m.label = label.to_owned();
+            m.category = category.to_owned();
+            m.default = default.to_owned();
+            return;
+        }
+        // Names live as long as the game (Controls rows hold them); a mod
+        // re-registering after a reload reuses its entry above.
+        let name: &'static str = Box::leak(name.to_owned().into_boxed_str());
+        let key = self
+            .saved_mods
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| default.to_owned());
+        self.keys.insert(name, key);
+        self.mods.push(ModKey {
+            name,
+            label: label.to_owned(),
+            category: category.to_owned(),
+            default: default.to_owned(),
+        });
+    }
+    /// Takes `other`'s mod keybinds and their bindings (settings rebuilt
+    /// from options.txt, which does not hold them).
+    pub fn adopt_mod_keys(&mut self, other: &KeyBinds) {
+        self.saved_mods = other.saved_mods.clone();
+        self.mods = other.mods.clone();
+        for m in &self.mods {
+            self.keys.insert(m.name, other.get(m.name).to_owned());
+        }
+    }
+    /// Reads `MOD_KEYS_FILE` in `dir`.
+    pub fn load_mod_keys(&mut self, dir: &std::path::Path) {
+        let Ok(text) = std::fs::read_to_string(dir.join(MOD_KEYS_FILE)) else {
+            return;
+        };
+        for line in text.lines() {
+            if let Some((name, key)) = line.strip_prefix("key_").and_then(|l| l.split_once(':')) {
+                self.saved_mods.insert(name.to_owned(), key.to_owned());
+            }
+        }
+    }
+    /// Writes `MOD_KEYS_FILE` in `dir` (only once a mod keybind exists).
+    pub fn save_mod_keys(&self, dir: &std::path::Path) {
+        let path = dir.join(MOD_KEYS_FILE);
+        if self.saved_mods.is_empty() && self.mods.is_empty() && !path.exists() {
+            return;
+        }
+        let mut all = self.saved_mods.clone();
+        for m in &self.mods {
+            all.insert(m.name.to_owned(), self.get(m.name).to_owned());
+        }
+        let text: String = all.iter().map(|(n, k)| format!("key_{n}:{k}\n")).collect();
+        let _ = std::fs::write(path, text);
     }
     /// Load `key_<name>` from options.txt; false for unknown mappings.
     pub fn set_saved(&mut self, name: &str, key: &str) -> bool {
@@ -311,7 +409,11 @@ impl KeyBinds {
             .collect()
     }
     pub fn reset_all(&mut self) {
-        *self = Self::default();
+        let names: Vec<&'static str> = self.names().collect();
+        for name in names {
+            let default = self.default_for(name).to_owned();
+            self.set(name, &default);
+        }
     }
     /// Mappings sharing `name`'s key (KeyMapping.same), for conflict marks.
     pub fn conflicts(&self, name: &str) -> Vec<&'static str> {
@@ -319,12 +421,10 @@ impl KeyBinds {
         if key == "key.keyboard.unknown" {
             return Vec::new();
         }
-        MAPPINGS
-            .iter()
-            .filter(|(n, _, _)| {
+        self.names()
+            .filter(|n| {
                 *n != name && self.get(n) == key && (!self.is_default(n) || !self.is_default(name))
             })
-            .map(|(n, _, _)| *n)
             .collect()
     }
     /// The mapping a physical input triggers (first in list order).

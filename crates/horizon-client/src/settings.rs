@@ -327,6 +327,10 @@ impl Settings {
                 ..Self::default()
             },
         };
+        let mut settings = settings;
+        if let Some(dir) = path.parent() {
+            settings.keys.load_mod_keys(dir);
+        }
         settings.describe_for_crashes();
         settings
     }
@@ -560,6 +564,7 @@ impl Settings {
             self.controller.save(dir);
             self.extras.save(dir);
             self.mods.save(dir);
+            self.keys.save_mod_keys(dir);
         }
     }
     /// Volume of a sound source (master excluded).

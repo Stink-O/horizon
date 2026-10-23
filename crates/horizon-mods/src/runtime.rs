@@ -96,6 +96,8 @@ pub enum Output {
     Screen { id: String, open: bool },
     /// `world.run-commands`: to run at operator level, silently, in order.
     Commands { id: String, commands: Vec<String> },
+    /// `input.register-key`: the game lists the mods' keybinds again.
+    Keys,
     /// `world.play-sound`.
     Sound {
         event: String,
@@ -103,6 +105,18 @@ pub enum Output {
         volume: f32,
         pitch: f32,
     },
+}
+
+/// A keybind a mod registered (capability `input`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ModKey {
+    pub mod_id: String,
+    pub mod_name: String,
+    /// The mod's own name for it.
+    pub name: String,
+    pub label: String,
+    /// The default key, as options.txt writes keys.
+    pub key: String,
 }
 
 /// A mod's post-processing pass (capability `render`).
@@ -162,9 +176,9 @@ struct State {
     /// needs its own budget.
     storage_budget: u64,
     limits: StoreLimits,
-    /// Capability `input`: claimed item ids, (name, key) binds, queued events.
+    /// Capability `input`: claimed item ids, keybinds, queued events.
     claims: Vec<String>,
-    keys: Vec<(String, String)>,
+    keys: Vec<ModKey>,
     events: Vec<InputEvent>,
     /// Capability `ui`: what the open screen draws (None: closed), and the
     /// cursor while it is open.
@@ -523,19 +537,12 @@ impl Mods {
                 .then(|| run.store.data().id.as_str())
         })
     }
-    /// (mod id, bind name) for each registered keybind on `key` (a key
-    /// name as options.txt writes it).
-    pub fn keys_on(&self, key: &str) -> Vec<(String, String)> {
+    /// The running mods' keybinds.
+    pub fn keys(&self) -> Vec<ModKey> {
         self.entries
             .iter()
             .filter_map(|e| e.run.as_ref())
-            .flat_map(|r| {
-                let s = r.store.data();
-                s.keys
-                    .iter()
-                    .filter(|(_, k)| k == key)
-                    .map(|(name, _)| (s.id.clone(), name.clone()))
-            })
+            .flat_map(|r| r.store.data().keys.iter().cloned())
             .collect()
     }
     /// Queues an input event for mod `id`'s next `poll`.
@@ -746,10 +753,21 @@ impl input::Host for State {
     fn claim_items(&mut self, ids: Vec<String>) {
         self.claims = ids.into_iter().take(CLAIMS).collect();
     }
-    fn register_key(&mut self, name: String, key: String) {
-        self.keys.retain(|(n, _)| *n != name);
+    fn register_key(&mut self, name: String, label: String, key: String) {
+        let key = ModKey {
+            mod_id: self.id.clone(),
+            mod_name: self.name.clone(),
+            name: clip(name),
+            label: clip(label),
+            key: clip(key),
+        };
+        if self.keys.contains(&key) {
+            return;
+        }
+        self.keys.retain(|k| k.name != key.name);
         if self.keys.len() < KEYS {
-            self.keys.push((clip(name), clip(key)));
+            self.keys.push(key);
+            self.out.push(Output::Keys);
         }
     }
     fn held(&mut self) -> Option<HeldItem> {
