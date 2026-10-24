@@ -281,7 +281,8 @@ impl Game<'_> {
         }
         let snapshot = self.mod_snapshot();
         self.mods.mods.set_snapshot(snapshot);
-        self.mods.mods.tick(self.ticks);
+        let ticks = self.ticks;
+        horizon_client::spans::time("tick_mods", || self.mods.mods.tick(ticks));
         self.show_mod_output();
     }
     /// Once per frame: the frame hook, and dev mods' rebuilds.
@@ -634,11 +635,32 @@ impl Game<'_> {
                     ..g.player_source()
                 };
                 g.exec = Default::default();
-                if let Err(e) = g.execute_line(line.trim_start_matches('/'), source) {
+                let result = horizon_client::spans::time(command_span(line), || {
+                    g.execute_line(line.trim_start_matches('/'), source)
+                });
+                if let Err(e) = result {
                     log::debug!("mod command {line:?} failed: {e:?}");
                 }
             }
         });
         self.exec = saved;
+    }
+}
+
+/// The span a mod's command is timed under (`HORIZON_SPIKES`): what it runs, through any `execute ... run`.
+fn command_span(line: &str) -> &'static str {
+    let run = line
+        .rsplit(" run ")
+        .next()
+        .unwrap_or(line)
+        .trim_start_matches('/');
+    match run.split_whitespace().next().unwrap_or("") {
+        "fill" => "mod_fill",
+        "setblock" => "mod_setblock",
+        "summon" => "mod_summon",
+        "particle" => "mod_particle",
+        "playsound" => "mod_playsound",
+        "kill" => "mod_kill",
+        _ => "mod_other",
     }
 }

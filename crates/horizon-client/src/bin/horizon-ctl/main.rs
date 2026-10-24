@@ -286,8 +286,11 @@ fn usage(name: &str) -> String {
 
 /// Screenshot paths are written by the game process: make them absolute here.
 fn absolute_paths(words: &mut [String]) {
-    if words.first().map(String::as_str) == Some("screenshot")
-        && let Some(path) = words.get_mut(1)
+    if matches!(
+        words.first().map(String::as_str),
+        Some("screenshot" | "record")
+    ) && let Some(path) = words.get_mut(1)
+        && path != "stop"
         && let Ok(cwd) = std::env::current_dir()
     {
         *path = cwd.join(&*path).display().to_string();

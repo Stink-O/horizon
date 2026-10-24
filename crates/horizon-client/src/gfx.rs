@@ -481,6 +481,8 @@ pub struct Renderer {
     pub screenshot: Option<PathBuf>,
     /// Outcome of the last screenshot: frame size, or the error.
     pub screenshot_result: Option<std::result::Result<[u32; 2], String>>,
+    /// The video being recorded (control socket `record`).
+    recording: Option<crate::recorder::Recorder>,
     /// Brightness option (lightmap gamma), 0..1.
     pub gamma: f32,
     /// Optional full-light lightmap (Horizon Extras).
@@ -2248,6 +2250,7 @@ impl Renderer {
             uploaded_bytes: 0,
             started: Instant::now(),
             screenshot: None,
+            recording: None,
             screenshot_result: None,
             gamma: 0.5,
             fullbright: false,
@@ -4092,6 +4095,21 @@ impl Renderer {
                 None
             }
         });
+        if self
+            .recording
+            .as_ref()
+            .is_some_and(|r| r.size() != [self.config.width, self.config.height])
+            && let Some(r) = self.recording.take()
+        {
+            // The window changed size: the video can't, so it ends here.
+            match r.finish(&self.device) {
+                Ok(n) => log::info!("recording stopped: the window was resized ({n} frames)"),
+                Err(e) => log::warn!("recording stopped: {e}"),
+            }
+        }
+        if let Some(r) = &mut self.recording {
+            r.capture(&self.device, &mut encoder, &target_texture);
+        }
         self.uploads.finish(&encoder);
         if has_section_copies {
             self.section_copy_bytes = 0;
@@ -4110,6 +4128,9 @@ impl Renderer {
         if let Some(timer) = &mut self.gpu_timer {
             timer.submitted();
             timer.collect(&self.device, &mut self.gpu_times);
+        }
+        if let Some(r) = &mut self.recording {
+            r.collect(&self.device);
         }
         if let Some((path, buffer)) = readback {
             self.screenshot_result = Some(
@@ -4152,6 +4173,44 @@ impl Renderer {
     }
 }
 impl Renderer {
+    /// Start recording the finished frames to a video at `path` (control socket `record`).
+    pub fn start_recording(
+        &mut self,
+        path: &std::path::Path,
+        fps: f64,
+    ) -> std::result::Result<[u32; 2], String> {
+        if self.recording.is_some() {
+            return Err("already recording".into());
+        }
+        if !self.config.usage.contains(wgpu::TextureUsages::COPY_SRC)
+            || self.config.format.block_copy_size(None) != Some(4)
+        {
+            return Err(format!(
+                "this surface ({:?}) can't be read back",
+                self.config.format
+            ));
+        }
+        let size = [self.config.width, self.config.height];
+        let bgra = matches!(
+            self.config.format.remove_srgb_suffix(),
+            wgpu::TextureFormat::Bgra8Unorm
+        );
+        self.recording = Some(crate::recorder::Recorder::start(
+            path,
+            size,
+            self.padded_row(),
+            bgra,
+            fps,
+        )?);
+        Ok(size)
+    }
+    /// Stop recording: the frames written, or the error.
+    pub fn stop_recording(&mut self) -> std::result::Result<u64, String> {
+        self.recording
+            .take()
+            .ok_or("not recording")?
+            .finish(&self.device)
+    }
     fn padded_row(&self) -> u32 {
         (self.config.width * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
     }

@@ -174,6 +174,9 @@ pub const COMMANDS: &[Cmd] = &[
     cmd!("screenshot", Session, "screenshot PATH", "write the next rendered frame as a PNG",
         "Relative paths are taken from horizon-ctl's directory. Over MCP the image is returned directly.",
         ["horizon-ctl screenshot view.png"], &[], mcp: true, local: false),
+    cmd!("record", Session, "record PATH [FPS] | record stop", "record the finished frames to a video, or stop",
+        "Streams every finished frame (post passes and HUD included) to ffmpeg, which must be installed, at a steady FPS (default 60; frames are repeated or dropped to keep the game's speed). Uses NVENC when ffmpeg has it. Relative paths are taken from horizon-ctl's directory. The window must keep its size while recording.",
+        ["horizon-ctl record strike.mp4", "horizon-ctl record stop"], &[], mcp: false, local: false),
     // Observe
     cmd!("state", Observe, "state", "player, world, screen and crosshair target in one reply",
         "position, block_pos, eye, yaw, pitch, velocity, on_ground, health, food, saturation, xp, effects, gamemode, dimension, time, weather, the screen or title menu, the held item, what the crosshair points at and whether an action is running.",

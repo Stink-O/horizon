@@ -28,6 +28,7 @@ const HELP: &[&str] = &[
     "fill X1 Y1 Z1 X2 Y2 Z2 BLOCK   set a box of loaded blocks",
     "resume                         leave the pause menu",
     "screenshot PATH                write the next frame as PNG",
+    "record PATH [FPS] | record stop  record the finished frames to a video (ffmpeg), at FPS (default 60)",
     "chat TEXT                      send a chat line or /command as if typed",
     "type TEXT                      type into the open chat box (key enter tap sends)",
     "chat-log [N]                   the newest N chat messages (default 10)",
@@ -493,6 +494,25 @@ impl Game<'_> {
                 renderer.screenshot = Some(arg(1)?.into());
                 self.pending_screenshot = Some(reply.clone());
                 Ok(None)
+            }
+            "record" => {
+                let renderer = self.renderer.as_mut().ok_or("no renderer yet")?;
+                if arg(1)? == "stop" {
+                    let frames = renderer.stop_recording()?;
+                    return Ok(Some(json!({ "ok": true, "frames": frames })));
+                }
+                let fps = match words.get(2) {
+                    Some(f) => f
+                        .parse::<f64>()
+                        .ok()
+                        .filter(|f| *f >= 1.0 && *f <= 240.0)
+                        .ok_or("FPS must be 1..240")?,
+                    None => 60.0,
+                };
+                let size = renderer.start_recording(std::path::Path::new(arg(1)?), fps)?;
+                Ok(Some(
+                    json!({ "ok": true, "width": size[0], "height": size[1], "fps": fps }),
+                ))
             }
             "chat" => {
                 let text = line.trim_start().strip_prefix("chat").unwrap_or("").trim();
