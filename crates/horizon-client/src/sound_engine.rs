@@ -25,6 +25,8 @@ pub const UI: usize = 10;
 /// sources: `clamp((int) sqrt(255), 2, 8)` streaming, the rest static.
 pub const STATIC_CHANNELS: usize = 247;
 pub const STREAMING_CHANNELS: usize = 8;
+/// Static channels only sounds played to the listener (no position) may take.
+const HEARD_RESERVE: usize = 16;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PlayResult {
@@ -803,7 +805,15 @@ impl SoundEngine {
         let looping = instance.looping && instance.delay <= 0;
         let streaming = sound.stream;
         let pool = usize::from(streaming);
-        let channel = if self.used[pool] >= self.limits[pool] {
+        // Sounds out in the world leave a few static channels free, so a flood of them (a crater's worth of blocks
+        // breaking) can't stop the ones played to the listener.
+        let positional = !instance.relative && instance.attenuation != Attenuation::None;
+        let reserved = if positional && !streaming {
+            HEARD_RESERVE
+        } else {
+            0
+        };
+        let channel = if self.used[pool] + reserved >= self.limits[pool] {
             None
         } else {
             backend.create(streaming)

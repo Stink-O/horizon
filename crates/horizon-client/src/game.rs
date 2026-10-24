@@ -2502,9 +2502,20 @@ impl Game<'_> {
                     data,
                 } => {
                     // LevelEventHandler: destroy particles and the block's
-                    // break sound (none for air).
+                    // break sound (none for air). ServerLevel.levelEvent only
+                    // sends it to players within 64 blocks.
                     let state = BlockStateId(data as u32);
                     let p = [pos.x, pos.y, pos.z];
+                    if self.player.as_ref().is_some_and(|me| {
+                        let d = [
+                            f64::from(pos.x) + 0.5 - me.position.x,
+                            f64::from(pos.y) + 0.5 - me.position.y,
+                            f64::from(pos.z) + 0.5 - me.position.z,
+                        ];
+                        d[0] * d[0] + d[1] * d[1] + d[2] * d[2] >= 64.0 * 64.0
+                    }) {
+                        continue;
+                    }
                     self.destroy_particles(p, state);
                     if self.res.facts().is_air(state) {
                         continue;
