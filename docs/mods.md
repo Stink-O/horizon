@@ -3,8 +3,9 @@
 Horizon gets its own mod system, written in Rust and run in a sandbox, plus
 two ways to bring over what Java players use: native Horizon ports of popular
 mods and the data-driven parts of packs and mods. Fabric and NeoForge jars do
-**not** run as they are: [research/java-mod-compat.md](research/java-mod-compat.md)
-explains why and what we do instead.
+**not** run as they are: their code calls and patches Minecraft's Java classes, and
+Horizon has none. What carries over is the data and assets inside a jar
+([modpacks.md](modpacks.md)).
 
 Mods are **off and absent by default**. A fresh install has no `horizon-mods`
 folder, loads no runtime and plays exactly like vanilla 26.3.
@@ -15,10 +16,11 @@ folder, loads no runtime and plays exactly like vanilla 26.3.
 | SDK for mod authors | `crates/horizon-mod-sdk` | 0.1 |
 | Example mod | `crates/horizon-mod-sdk/examples/coords-hud` | coordinates, facing and time HUD, `/where`, `/coords` |
 | Runtime | `crates/horizon-mods` | wasmtime 36 LTS, component model |
-| Authoring tool | `crates/cargo-horizon-mod` | `cargo horizon-mod new / build / run` |
+| Authoring tool | `crates/cargo-horizon-mod` | `cargo horizon-mod new / build / run / check`, and the registry's CI (`registry build / review / list`) |
 | In the game | `crates/horizon-client/src/game/mods.rs`, Options > Mods | client mods |
-| Launcher mod browser (Modrinth, CurseForge with a key) | [mod-browser.md](mod-browser.md) | resource packs, shader packs, modpacks |
-| `.hmod` index, signing, server mods, registries | this page, [Roadmap](#roadmap) | planned |
+| Launcher mod browser (Modrinth, CurseForge with a key) | [mod-browser.md](mod-browser.md) | resource packs, modpacks |
+| Registry index (`index.json`, `.hpack`), signatures | `horizon_mods::index`, [api/mod-index.md](api/mod-index.md) | schema 1; launcher and website next |
+| Server mods, registries | this page, [Roadmap](#roadmap) | planned |
 
 ## Design goals
 
@@ -86,7 +88,7 @@ folder, loads no runtime and plays exactly like vanilla 26.3.
 | `storage` | `storage` | `get(key)`, `set(key, value)`, `delete(key)`: a per-mod folder of up to 64 files, 4 MiB total, at most 1 MiB written per call |
 | `input` | `input` | `claim-items(ids)`: right-clicks with those items are the mod's (`use-start`, `use-stop` with the ticks held; no zoom, placing or swing); `register-key(name, label, key)`: listed in Options > Controls under the mod's name, rebindable (saved in horizon-mod-keys.txt); `held()`; `poll()`: the events since the last call (at most 256 kept) |
 | `ui` | `ui` | `show(draws)`: opens the mod's screen (or redraws it) from fills, quads, sprites, items and text in GUI pixels from the centre, up to 4096; `close()`; `cursor()`. Clicks and Escape come back as `input` events; the screen does not pause |
-| `render` | `render` | `set-post(wgsl)`: a post-processing pass in the shader-pack stage format, drawn after the shader pack if one is on; `set-params(16 floats)`, read as `frame.mod_params`; `clear-post()`; `shake(strength, seconds)`: a camera jolt that fades out (jolts add up; scaled by Distortion Effects) |
+| `render` | `render` | `set-post(wgsl)`: a post-processing pass (WGSL after the [mod pass prelude](#a-mods-post-pass)), drawn over the world before a shader pack's post-processing; `set-params(16 floats)`, read as `frame.mod_params`; `clear-post()`; `shake(strength, seconds)`: a camera jolt that fades out (jolts add up; scaled by Distortion Effects) |
 | `world` | `world` | `raycast(distance)`: the first block along the view, up to 1024 blocks (past the render distance only across the distant terrain, with LOD Distance on); `run-commands(list)`: at operator level, silently, this tick (up to 8192 per call; single player and LAN hosts only); `play-sound(event, at, volume, pitch)` |
 
 | Hook (export) | When |
@@ -109,10 +111,29 @@ unchanged. The game decides when a mod's item use, screen and commands apply
 (the use goes to the mod that claimed the item; a screen opens only over
 gameplay; commands need a world this game runs).
 
+### A mod's post pass
+
+`render.set-post` takes a WGSL fragment shader with an `@fragment fn fs_main(in: StageIn) -> @location(0) vec4<f32>`.
+The game puts [`gfx/mod_post.wgsl`](../crates/horizon-client/src/gfx/mod_post.wgsl) before it, which gives the pass:
+
+- `scene_color` (the world's picture) and `scene_depth` (its depth: reversed, 1 at the near plane and 0 for the sky),
+  with `linear_sampler` and `nearest_sampler`;
+- `frame`, a uniform: the camera's `view`, `projection` and their inverses, `camera_position`, `resolution` (width,
+  height and their reciprocals), `time` (seconds, frames, the time of day, the partial tick), `sun`, `sky_color`,
+  `fog_color`, `view_params` (near, far, render distance, vertical field of view) and the mod's sixteen
+  `mod_params`;
+- `StageIn` (the pixel's `position` and its `uv`, 0,0 at the top left), and helpers: `depth_at`, `is_sky`,
+  `linear_depth`, `view_position`, `world_offset` (a pixel's position relative to the camera), `luminance`,
+  `srgb_to_linear`, `linear_to_srgb`.
+
+The view bobbing, hurt tilt and camera shake are in `view` and `camera_position`, so a ray from the camera through a
+pixel meets what the world drew there. The pass runs over the world's own target (the world then always renders to
+one), and what it returns is what a shader pack's post-processing or the copy to the screen takes.
+
 ### Planned interfaces
 
 Each is a new capability, added in a 0.x minor version so older mods keep
-loading. Ordered by what the first native ports need ([research](research/java-mod-compat.md#port-first)):
+loading. Ordered by what the first native ports need:
 
 | Interface | For | Notes |
 |---|---|---|
@@ -120,7 +141,7 @@ loading. Ordered by what the first native ports need ([research](research/java-m
 | `target` | the crosshair's block or entity, with its state and NBT summary | Jade/WTHIT-style tooltips |
 | `inventory-read` | the player's inventory, held item, open container | AppleSkin, recipe viewers |
 | `recipes` | the recipe registry and lookups | JEI/EMI-style viewers |
-| `ui` | widgets: text, item icons, lists, a screen the mod owns, a settings page in Options > Mods | built on `ui_theme` so it matches the menus |
+| `ui` | widgets: text, item icons, lists, a screen the mod owns, a settings page in Options > Mods | built from vanilla's widgets (`ui`) so it matches the menus |
 | `world-read` | blocks and biomes around the player, within the render distance | minimaps, schematics |
 | `render` | world-space lines, boxes and ghost blocks in a per-frame budget | Litematica-style placement, waypoints |
 | `registries` | new blocks, items, entities and recipes, mostly data: JSON models, textures, loot and recipes in the `.hmod`'s `assets/` and `data/` | server side; see [Multiplayer](#multiplayer) |
@@ -147,10 +168,17 @@ proposal, no profiling. Its cranelift backend generates native code for x86-64
 and ARM64 on Windows, macOS and Linux, which is why one `.hmod` serves them
 all.
 
+The game links it only with its `mods` feature: every release build turns it
+on (`release.yml`), and a build from source needs
+`cargo build --release -p horizon-client --features mods` to run code mods.
+Without it (the tests and probes) wasmtime and cranelift aren't built, a
+quarter of a clean build; content mods still load, and the game logs why the
+code mods don't start.
+
 ### Performance
 
 Measured on the Mac mini (M4 Pro), release build, `cargo test -p
-horizon-mods --release --test sandbox -- --ignored --nocapture`:
+horizon-mods --features runtime,pack --release --test sandbox -- --ignored --nocapture`:
 
 | | per call |
 |---|---|
@@ -190,7 +218,8 @@ chat (`Mod Test Guest stopped: it took too long (an endless loop?)`), marks it
 on the Mods page and carries on; the other mods keep running. Host functions
 clip what a mod hands back (chat lines per call, HUD lines and lengths). Tests:
 `crates/horizon-mods/tests/sandbox.rs` (an endless loop, a panic and a 1 GiB
-allocation, next to a healthy mod).
+allocation, next to a healthy mod; `cargo test -p horizon-mods --features
+runtime,pack`).
 
 ## Playing with mods
 
@@ -225,6 +254,18 @@ cargo horizon-mod build             # again after an edit: the running game relo
 always on, and the game checks its file once a second: rebuild and it restarts
 with "Mods reloaded" in chat. Its in-memory state starts over; whatever it
 saved with capability `storage` survives the reload.
+
+Before you submit it to the registry, run what its CI runs:
+
+```sh
+cargo horizon-mod check target/horizon-mod/my_mod.hmod   # --json for the report as JSON
+```
+
+It reads the manifest and content, refuses imports the capabilities don't
+cover, then plays the mod in the sandbox for 40 ticks, 120 frames, a chat line
+and each of its commands: it must start and never trap or overrun. It checks a
+`.hpack` and a resource pack `.zip` too, and a signature with `--key <public
+key> --signature <file>.minisig`.
 
 ### Template layout
 

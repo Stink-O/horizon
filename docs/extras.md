@@ -19,11 +19,12 @@ again restores vanilla's behaviour completely.
 | Game glue (input hooks, per-frame update) | `crates/horizon-client/src/game/extras.rs` |
 | Mouse Tweaks-style controls, sort buttons | `crates/horizon-client/src/game/tweaks.rs` |
 | Sort order and its clicks | `crates/horizon-client/src/inv_sort.rs` (pure, unit tested) |
-| The settings page | `options_horizon.rs`: the **Extras** section of Horizon's Options |
+| The settings page | `options_ui.rs` (`Page::Extras`): **Options → Horizon Settings... → Extras...** |
 
-The settings are grouped by extra. On Horizon's page an extra's own settings
-(its key, corner, size...) show under its switch while it is on (`Item::parent`);
-Classic's Horizon Extras screen lists them all, two buttons to a row.
+The settings are grouped by extra, under a header each, two buttons to a row as
+vanilla's options lists are, and each says what it does in its tooltip. An
+extra's own settings (its key, corner, size...) are greyed out while its switch
+is off (`Item::parent`).
 
 `game.rs` only gets one-line hooks (key, wheel, mouse, frame, HUD), so the
 extras stay out of the way of other input and options work.
@@ -48,7 +49,7 @@ Horizon category in Controls, and adding one would put a non-vanilla mapping int
 
 ### Dynamic lights (`dynamicLights`, default off)
 - A light source held by a player or mob (main or off hand), dropped as an item, or an entity on
-  fire lights the blocks, entities and hand around it, as LambDynamicLights and OptiFine do. Not
+  fire lights the blocks, entities and hand around it, as dynamic-light mods do. Not
   in vanilla; the idea is ported, not a mod's code (issue #814).
 - An item glows like its block's default state (`getLightEmission`): torches 14, lanterns,
   glowstone, sea lanterns and jack o'lanterns 15, soul torches 10, a redstone torch 7; a lava bucket

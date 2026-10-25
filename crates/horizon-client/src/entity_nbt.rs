@@ -89,6 +89,47 @@ impl Base<'_> {
 }
 
 /// `LivingEntity` + `Mob` (+ `AgeableMob`, creeper and skeleton specifics).
+/// The mobs whose class extends vanilla's `Animal` (and so save `InLove`):
+/// not allays, villagers, golems, dolphins or fish.
+fn is_animal(id: &str) -> bool {
+    matches!(
+        id.strip_prefix("minecraft:").unwrap_or(id),
+        "pig"
+            | "cow"
+            | "mooshroom"
+            | "sheep"
+            | "chicken"
+            | "rabbit"
+            | "horse"
+            | "donkey"
+            | "mule"
+            | "zombie_horse"
+            | "skeleton_horse"
+            | "llama"
+            | "trader_llama"
+            | "goat"
+            | "panda"
+            | "polar_bear"
+            | "fox"
+            | "wolf"
+            | "cat"
+            | "ocelot"
+            | "parrot"
+            | "bee"
+            | "turtle"
+            | "armadillo"
+            | "frog"
+            | "axolotl"
+            | "hoglin"
+            | "strider"
+            | "camel"
+            | "camel_husk"
+            | "sniffer"
+            | "happy_ghast"
+            | "nautilus"
+            | "zombie_nautilus"
+    )
+}
 pub fn mob_to_nbt(m: &Mob, uuid: [i32; 4], raw: Option<&Tag>) -> Tag {
     let base = Base {
         id: &m.kind.id,
@@ -175,11 +216,14 @@ pub fn mob_to_nbt(m: &Mob, uuid: [i32; 4], raw: Option<&Tag>) -> Tag {
         for (key, value) in [
             ("Age", Tag::Int(0)),
             ("ForcedAge", Tag::Int(0)),
-            ("InLove", Tag::Int(0)),
             ("AgeLocked", Tag::Byte(0)),
         ] {
             map.entry(key.into()).or_insert(value);
         }
+    }
+    // Animal.addAdditionalSaveData: the love ticks left, whatever the save had.
+    if is_animal(id) {
+        map.insert("InLove".into(), Tag::Int(m.extra.in_love.max(0)));
     }
     match id {
         "minecraft:creeper" => {
@@ -445,10 +489,10 @@ pub fn mob_to_nbt(m: &Mob, uuid: [i32; 4], raw: Option<&Tag>) -> Tag {
                 map.entry(key.into()).or_insert(value);
             }
         }
+        // Sheep.addAdditionalSaveData: its wool as it is now.
         "minecraft:sheep" => {
-            for (key, value) in [("Color", Tag::Byte(0)), ("Sheared", Tag::Byte(0))] {
-                map.entry(key.into()).or_insert(value);
-            }
+            map.insert("Color".into(), Tag::Byte((m.extra.color & 15) as i8));
+            map.insert("Sheared".into(), Tag::Byte(i8::from(m.extra.sheared)));
         }
         // CopperGolem.addAdditionalSaveData.
         "minecraft:copper_golem" => {
@@ -620,6 +664,9 @@ pub fn mob_from_nbt(tag: &Tag, types: &HashMap<String, Arc<MobType>>, id: u32) -
         m.extra.age = number(tag.get("Age")).unwrap_or(0) as i32;
         m.extra.forced_age = number(tag.get("ForcedAge")).unwrap_or(0) as i32;
         m.extra.age_locked = flag(tag, "AgeLocked");
+    }
+    if is_animal(&m.kind.id) {
+        m.extra.in_love = number(tag.get("InLove")).unwrap_or(0) as i32;
     }
     m.name_visible = flag(tag, "CustomNameVisible");
     m.no_ai = flag(tag, "NoAI");
@@ -831,6 +878,11 @@ pub fn mob_from_nbt(tag: &Tag, types: &HashMap<String, Arc<MobType>>, id: u32) -
             m.extra.home = Some([v[0], v[1], v[2]]);
         }
         m.extra.egg_time = number(tag.get("life_ticks")).map_or(-1, |v| v as i32);
+    }
+    // Sheep.readAdditionalSaveData: white and unsheared when absent.
+    if m.species() == crate::mobs::Species::Sheep {
+        m.extra.color = number(tag.get("Color")).map_or(0, |c| (c as u8) & 15);
+        m.extra.sheared = flag(tag, "Sheared");
     }
     if m.species() == crate::mobs::Species::Shulker {
         m.extra.variant3 = number(tag.get("AttachFace")).unwrap_or(0).clamp(0, 5) as u8;
@@ -1101,6 +1153,72 @@ pub fn arrow_from_nbt(
     a.pickup_item = item;
     p.stuck = a.in_ground;
     Some((p, tag.get("inBlockState").cloned()))
+}
+
+/// `LargeFireball` and `SmallFireball`: `AbstractHurtingProjectile`'s
+/// `acceleration_power`, `Projectile`'s owner and flags, `ExplosionPower`.
+pub fn fireball_to_nbt(
+    p: &Projectile,
+    uuid: [i32; 4],
+    owner: Option<[i32; 4]>,
+    raw: Option<&Tag>,
+) -> Option<Tag> {
+    let power = match p.kind {
+        ProjectileKind::LargeFireball { power } => Some(power),
+        ProjectileKind::SmallFireball => None,
+        _ => return None,
+    };
+    let base = Base {
+        id: p.kind.id(),
+        uuid,
+        position: p.position,
+        motion: p.velocity,
+        rotation: [p.yaw, p.pitch],
+        on_ground: false,
+        fall_distance: 0.0,
+    };
+    let mut tag = base.tag(raw);
+    put(
+        &mut tag,
+        "acceleration_power",
+        Tag::Double(p.acceleration.to_bits()),
+    );
+    // Projectile: LeftOwner only when set; HasBeenShot once it has ticked
+    // (a fireball saved before its first tick keeps what it was loaded with).
+    if let Tag::Compound(map) = &mut tag {
+        map.remove(&"LeftOwner".into());
+    }
+    if p.left_owner {
+        put(&mut tag, "LeftOwner", Tag::Byte(1));
+    }
+    if p.age > 0 || tag.get("HasBeenShot").is_none() {
+        put(&mut tag, "HasBeenShot", Tag::Byte(i8::from(p.age > 0)));
+    }
+    if let Some(power) = power {
+        put(&mut tag, "ExplosionPower", Tag::Byte(power as i8));
+    }
+    if let Some(owner) = owner {
+        put(&mut tag, "Owner", Tag::IntArray(owner.to_vec()));
+    }
+    Some(tag)
+}
+
+pub fn fireball_from_nbt(tag: &Tag, player: Option<[i32; 4]>) -> Option<Projectile> {
+    let kind = match kind(tag)?.as_str() {
+        "minecraft:fireball" => ProjectileKind::LargeFireball {
+            power: number(tag.get("ExplosionPower")).unwrap_or(1) as i32,
+        },
+        "minecraft:small_fireball" => ProjectileKind::SmallFireball,
+        _ => return None,
+    };
+    let owner = uuid_from_tag(tag.get("Owner"));
+    let from_player = player.is_some() && owner == player;
+    let mut p = Projectile::new(kind, position(tag)?, from_player.then_some(Who::Player));
+    p.velocity = motion(tag);
+    [p.yaw, p.pitch] = rotation(tag);
+    p.left_owner = flag(tag, "LeftOwner");
+    p.acceleration = float(tag.get("acceleration_power")).unwrap_or(0.1);
+    Some(p)
 }
 
 /// `FallingBlockEntity`: BlockState, Time, DropItem, HurtEntities.
@@ -2049,5 +2167,79 @@ mod axolotl_nbt_tests {
         let mm = &restored.extra.animal_brain.as_ref().unwrap().mem;
         assert_eq!(mm.play_dead_ticks.value(), Some(78));
         assert_eq!(mm.temptation_cooldown_ticks.value(), Some(42));
+    }
+}
+
+#[cfg(test)]
+mod sheep_nbt_tests {
+    use super::*;
+    #[test]
+    fn a_sheep_keeps_its_dyed_and_sheared_wool() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.local/horizon-client")
+            .join(horizon_core::VANILLA_VERSION);
+        if !root.join("items.json").exists() {
+            return;
+        }
+        let data = crate::mobs::MobTypes::load(&root).unwrap();
+        let mut m = Mob::new(
+            1,
+            Arc::new(data.types["minecraft:sheep"].clone()),
+            Vec3::new(0.0, 4.0, 0.0),
+            0.0,
+        );
+        // Summoned white, then dyed red and sheared: the save has it now.
+        let raw = Tag::compound([("Color", Tag::Byte(0)), ("Sheared", Tag::Byte(0))]);
+        (m.extra.color, m.extra.sheared) = (14, true);
+        let tag = mob_to_nbt(&m, [1, 2, 3, 4], Some(&raw));
+        assert_eq!(
+            (number(tag.get("Color")), number(tag.get("Sheared"))),
+            (Some(14), Some(1))
+        );
+        let types: HashMap<String, Arc<MobType>> = data
+            .types
+            .iter()
+            .map(|(k, v)| (k.clone(), Arc::new(v.clone())))
+            .collect();
+        let back = mob_from_nbt(&tag, &types, 2).unwrap();
+        assert_eq!((back.extra.color, back.extra.sheared), (14, true));
+    }
+}
+
+#[cfg(test)]
+mod fireball_nbt_tests {
+    use super::*;
+    #[test]
+    fn a_fireball_round_trips_its_flight() {
+        let raw = Tag::compound([
+            ("id", Tag::String("minecraft:fireball".into())),
+            ("Pos", doubles(&[1.0, 70.0, -2.5])),
+            ("Motion", doubles(&[0.0, -0.5, 1.0])),
+            ("ExplosionPower", Tag::Byte(4)),
+            ("acceleration_power", Tag::Double(0.0f64.to_bits())),
+        ]);
+        let p = fireball_from_nbt(&raw, None).unwrap();
+        assert_eq!(p.kind, ProjectileKind::LargeFireball { power: 4 });
+        assert_eq!((p.velocity.z, p.acceleration), (1.0, 0.0));
+        let back = fireball_to_nbt(&p, [1, 2, 3, 4], None, None).unwrap();
+        assert_eq!(number(back.get("ExplosionPower")), Some(4));
+        assert_eq!(float(back.get("acceleration_power")), Some(0.0));
+        // Projectile.addAdditionalSaveData: no LeftOwner unless set, HasBeenShot always.
+        assert!(back.get("LeftOwner").is_none());
+        assert_eq!(number(back.get("HasBeenShot")), Some(0));
+        assert_eq!(
+            read_doubles::<3>(back.get("Motion")),
+            Some([0.0, -0.5, 1.0])
+        );
+        // A default fireball keeps vanilla's power and acceleration.
+        let plain = Tag::compound([
+            ("id", Tag::String("minecraft:fireball".into())),
+            ("Pos", doubles(&[0.0, 0.0, 0.0])),
+        ]);
+        let p = fireball_from_nbt(&plain, None).unwrap();
+        assert_eq!(
+            (p.kind, p.acceleration),
+            (ProjectileKind::LargeFireball { power: 1 }, 0.1)
+        );
     }
 }

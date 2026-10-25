@@ -565,7 +565,9 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
                 return;
             }
         }
-        let burnout = self.level.dimension() == super::Dimension::Nether && false;
+        // FireBlock.tick reads the INCREASED_FIRE_BURNOUT environment attribute
+        // (jungles, swamps, peaks, mushroom fields); Horizon doesn't yet.
+        let burnout = false;
         let extra = if burnout { -50 } else { 0 };
         for (direction, chance) in [
             (Direction::East, 300),
@@ -1615,16 +1617,19 @@ impl Behaviours {
         };
         ticks.handling_tick = false;
     }
-    /// Random-tick one chunk (`ServerLevel.tickChunk` block part). `sections`
-    /// yields the minimum block Y of every section the caller considers
-    /// randomly ticking (vanilla: sections containing randomly-ticking states),
-    /// in ascending order. Draws `randomTickSpeed` positions per section.
+    /// Random-tick one chunk (`ServerLevel.tickChunk` block part). Visits the
+    /// sections from the bottom up and draws `randomTickSpeed` positions in
+    /// each randomly ticking one (`LevelChunkSection.isRandomlyTicking`: it
+    /// holds a randomly ticking block or fluid). `next_ticking(level, min_y)`
+    /// is the minimum Y of the lowest such section from `min_y` up, as the
+    /// chunk is now: vanilla asks as it reaches each section, so the ticks of
+    /// the sections below count.
     pub fn tick_chunk_random<L: LevelAccess + ?Sized>(
         &self,
         level: &mut L,
         ticks: &mut Ticks,
         chunk: ChunkPos,
-        sections: impl IntoIterator<Item = i32>,
+        mut next_ticking: impl FnMut(&mut L, i32) -> Option<i32>,
     ) {
         let speed = level.game_rules().random_tick_speed;
         if speed <= 0 {
@@ -1639,11 +1644,13 @@ impl Behaviours {
                 }
             }
         }
-        for min_y in sections {
+        let mut from = level.min_y();
+        while let Some(min_y) = next_ticking(level, from).filter(|&y| y < level.max_y()) {
             for _ in 0..speed {
                 let pos = ticks.block_random_pos(min_x, min_y, min_z, 15);
                 self.sim(level, ticks).random_tick_at(pos);
             }
+            from = min_y + 16;
         }
     }
     /// Random-tick a single position (block then fluid), as `tickChunk` does.

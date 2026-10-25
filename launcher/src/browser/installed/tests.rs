@@ -65,12 +65,7 @@ fn project(id: &str, kind: Kind) -> Project {
         license: "MIT".into(),
         kind,
         game_versions: vec![GAME.into()],
-        loaders: vec![if kind == Kind::ShaderPack {
-            "iris"
-        } else {
-            "minecraft"
-        }
-        .into()],
+        loaders: vec!["minecraft".into()],
     }
 }
 
@@ -91,6 +86,7 @@ impl Fake {
                     .map(|b| format!("{b:02x}"))
                     .collect(),
             ),
+            sha256: None,
             sha1: None,
             primary: true,
         };
@@ -217,29 +213,17 @@ fn nothing_is_installed_when_a_check_fails() {
     assert!(remove(&home, "good").is_err());
     assert!(home.join("resourcepacks/good-1.zip").exists());
 
-    // What doesn't run is refused before anything is asked for.
-    let mut canvas = project("canvas", Kind::ShaderPack);
-    canvas.loaders = vec!["canvas".into()];
-    fake.add(canvas.clone());
-    assert!(install(&fake, &canvas, true, &home, NONE)
-        .unwrap_err()
-        .contains("doesn't run"));
     let pack = project("pack", Kind::Modpack);
     assert!(plan(&fake, &pack, false)
         .unwrap_err()
-        .contains("Modpacks page"));
+        .contains("imported, not installed"));
     fs::remove_dir_all(&home).unwrap();
 }
 
 #[test]
-fn shader_packs_go_to_their_folder_and_modpacks_download_checked() {
+fn modpacks_download_checked() {
     let home = home("kinds");
     let mut fake = Fake::default();
-    fake.add(project("bsl", Kind::ShaderPack));
-    fake.release("bsl", "10", &[], b"shaders", false);
-    install(&fake, &fake.project("bsl").unwrap(), false, &home, NONE).unwrap();
-    assert!(home.join("shaderpacks/bsl-10.zip").is_file());
-
     fake.add(project("atm", Kind::Modpack));
     fake.release("atm", "1", &[], b"mrpack", false);
     let downloads = home.join("downloads");
@@ -248,5 +232,111 @@ fn shader_packs_go_to_their_folder_and_modpacks_download_checked() {
     fake.release("atm", "2", &[], b"mrpack 2", true);
     assert!(fetch_modpack(&fake, &fake.project("atm").unwrap(), &downloads, &|_| {}).is_err());
     assert!(!downloads.join("atm-2.zip").exists());
+    fs::remove_dir_all(&home).unwrap();
+}
+
+/// A NeoForge jar with `files` beside its `neoforge.mods.toml` for mod `id`.
+fn mod_jar(id: &str, files: &[(&str, &str)]) -> Vec<u8> {
+    use std::io::Write;
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let toml = format!(
+        "modLoader = \"javafml\"\nlicense = \"MIT\"\n[[mods]]\nmodId = \"{id}\"\nversion = \"1.0\"\ndisplayName = \"{id}\"\n"
+    );
+    for (name, text) in [("META-INF/neoforge.mods.toml", toml.as_str())]
+        .into_iter()
+        .chain(files.iter().copied())
+    {
+        zip.start_file(name, zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(text.as_bytes()).unwrap();
+    }
+    zip.finish().unwrap().into_inner()
+}
+
+#[test]
+fn java_mods_are_ported_turned_on_refused_on_clashes_and_removed() {
+    let home = home("java");
+    let mut fake = Fake::default();
+    for id in ["ruby", "lib", "gem"] {
+        let mut p = project(id, Kind::Mod);
+        p.loaders = vec!["neoforge".into()];
+        fake.add(p);
+    }
+    let block = r#"{"variants": {"": {"model": "ruby:block/ruby_block"}}}"#;
+    let recipe = r#"{"type": "minecraft:crafting_shapeless", "ingredients": ["minecraft:red_dye"], "result": {"id": "ruby:ruby_block"}}"#;
+    let ruby = mod_jar(
+        "ruby",
+        &[
+            ("assets/ruby/blockstates/ruby_block.json", block),
+            ("data/ruby/recipe/ruby_block.json", recipe),
+        ],
+    );
+    // A library: nothing to port.
+    let lib = mod_jar("lib", &[]);
+    // Another project with the same mod id.
+    let gem = mod_jar("ruby", &[("assets/ruby/blockstates/gem.json", block)]);
+    fake.release("ruby", "1", &["lib"], &ruby, false);
+    fake.release("lib", "1", &[], &lib, false);
+    fake.release("gem", "1", &[], &gem, false);
+
+    let done = install(&fake, &fake.project("ruby").unwrap(), false, &home, NONE).unwrap();
+    assert_eq!(done.len(), 1, "the library isn't installed");
+    let entry = &done[0];
+    assert_eq!(entry.file, "horizon-mods/ruby");
+    assert_eq!(entry.verdict.as_deref(), Some("Works"));
+    assert!(
+        entry
+            .skipped
+            .iter()
+            .any(|s| s.starts_with("needs Pack lib")),
+        "{:?}",
+        entry.skipped
+    );
+    assert!(entry.namespaces.contains(&"ruby".to_owned()));
+    assert!(home.join("horizon-mods/ruby/horizon-mod.toml").is_file());
+    assert_eq!(
+        fs::read_to_string(home.join("horizon-mods.txt")).unwrap(),
+        "mod.ruby:true\n"
+    );
+    // The jar isn't kept, its check is.
+    assert!(!home
+        .join("mod-browser/checks-1/.downloads/ruby-1.zip")
+        .exists());
+
+    let clash = install(&fake, &fake.project("gem").unwrap(), false, &home, NONE).unwrap_err();
+    assert!(clash.contains("shares its id or namespace"), "{clash}");
+    assert!(!home.join("horizon-mods/gem").exists());
+
+    let removed = remove(&home, "ruby").unwrap();
+    assert_eq!(removed.kind, Kind::Mod);
+    assert!(!home.join("horizon-mods/ruby").exists());
+    assert_eq!(
+        fs::read_to_string(home.join("horizon-mods.txt")).unwrap(),
+        ""
+    );
+    fs::remove_dir_all(&home).unwrap();
+}
+
+#[test]
+fn shader_packs_older_launchers_installed_are_left_alone() {
+    let home = home("old-shader-pack");
+    fs::create_dir_all(home.join("shaderpacks")).unwrap();
+    fs::write(home.join("shaderpacks/old-pack.zip"), b"shaders").unwrap();
+    let entry = |kind: &str, file: &str| {
+        serde_json::json!({
+            "source": "modrinth", "project": file, "slug": file, "title": file, "kind": kind,
+            "version": "1", "number": "1", "file": file, "checksum": "SHA-512:00", "page": ""
+        })
+    };
+    let manifest = serde_json::json!({ "entries": [
+        entry("shader-pack", "shaderpacks/old-pack.zip"),
+        entry("resource-pack", "resourcepacks/faithful-1.zip"),
+    ]});
+    fs::write(home.join("mod-browser.json"), manifest.to_string()).unwrap();
+    let installed = Installed::load(&home);
+    assert_eq!(installed.entries.len(), 1);
+    assert_eq!(installed.entries[0].kind, Kind::ResourcePack);
+    installed.save(&home).unwrap();
+    assert!(home.join("shaderpacks/old-pack.zip").is_file());
     fs::remove_dir_all(&home).unwrap();
 }

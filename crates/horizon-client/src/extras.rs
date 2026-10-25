@@ -1,7 +1,8 @@
 //! Horizon's optional extras (zoom, FPS counter, keystroke overlay): their
 //! settings, kept in `horizon-extras.txt` next to `options.txt` so that file
 //! stays exactly vanilla's, and the logic behind them. Every extra is off by
-//! default; see `docs/extras.md`.
+//! default; see `docs/extras.md`. Horizon's own switches outside the Extras page
+//! (No AI, Agent Control, Discord Rich Presence) are kept here too.
 use std::{collections::VecDeque, fs, path::Path};
 
 pub const FILE: &str = "horizon-extras.txt";
@@ -107,6 +108,13 @@ pub struct Extras {
     pub sort: bool,
     /// A vanilla key name: sorts the part under the cursor.
     pub sort_key: String,
+    /// No AI: every AI feature hidden and off (`horizon_core::no_ai`; the launcher writes it too).
+    pub no_ai: bool,
+    /// Agents may control the game the player starts: it opens its control socket for
+    /// horizon-ctl and MCP clients (off by default; an agent's own launch always opens it).
+    pub agent_control: bool,
+    /// "Playing Horizon" on the player's Discord profile (`discord_presence`; on by default).
+    pub discord_presence: bool,
 }
 impl Default for Extras {
     fn default() -> Self {
@@ -135,6 +143,9 @@ impl Default for Extras {
             mouse_tweaks_wheel: true,
             sort: false,
             sort_key: "key.keyboard.unknown".into(),
+            no_ai: false,
+            agent_control: false,
+            discord_presence: true,
         }
     }
 }
@@ -198,6 +209,9 @@ impl Extras {
                 "mouseTweaksWheel" => e.mouse_tweaks_wheel = flag(e.mouse_tweaks_wheel),
                 "sort" => e.sort = flag(e.sort),
                 "sortKey" if value.starts_with("key.") => e.sort_key = value.to_owned(),
+                horizon_core::no_ai::KEY => e.no_ai = flag(e.no_ai),
+                "agentControl" => e.agent_control = flag(e.agent_control),
+                "discordPresence" => e.discord_presence = flag(e.discord_presence),
                 _ => {}
             }
         }
@@ -205,7 +219,7 @@ impl Extras {
     }
     pub fn serialize(&self) -> String {
         format!(
-            "fullbright:{}\ndynamicLights:{}\nzoom:{}\nzoomKey:{}\nzoomLevel:{}\nzoomSmooth:{}\nzoomSensitivity:{}\nfps:{}\nfpsCorner:{}\nfpsLows:{}\nkeystrokes:{}\nkeystrokesCorner:{}\nkeystrokesCps:{}\nminimap:{}\nminimapCorner:{}\nminimapSize:{}\nminimapShape:{}\nminimapZoom:{}\nminimapRotate:{}\nautoReconnect:{}\nmouseTweaks:{}\nmouseTweaksWheel:{}\nsort:{}\nsortKey:{}\n",
+            "fullbright:{}\ndynamicLights:{}\nzoom:{}\nzoomKey:{}\nzoomLevel:{}\nzoomSmooth:{}\nzoomSensitivity:{}\nfps:{}\nfpsCorner:{}\nfpsLows:{}\nkeystrokes:{}\nkeystrokesCorner:{}\nkeystrokesCps:{}\nminimap:{}\nminimapCorner:{}\nminimapSize:{}\nminimapShape:{}\nminimapZoom:{}\nminimapRotate:{}\nautoReconnect:{}\nmouseTweaks:{}\nmouseTweaksWheel:{}\nsort:{}\nsortKey:{}\n{}:{}\nagentControl:{}\ndiscordPresence:{}\n",
             bool_text(self.fullbright),
             bool_text(self.dynamic_lights),
             bool_text(self.zoom),
@@ -234,6 +248,10 @@ impl Extras {
             bool_text(self.mouse_tweaks_wheel),
             bool_text(self.sort),
             self.sort_key,
+            horizon_core::no_ai::KEY,
+            bool_text(self.no_ai),
+            bool_text(self.agent_control),
+            bool_text(self.discord_presence),
         )
     }
     /// Binds the extra key `name` (`ZOOM_KEY`, `SORT_KEY`); false for
@@ -451,6 +469,11 @@ pub enum Item {
     MouseTweaksWheel,
     Sort,
     SortKey,
+    /// Not on the Extras page: Horizon Settings shows No AI, its AI Agent page Agent Control.
+    NoAi,
+    AgentControl,
+    /// On the Horizon Settings page.
+    DiscordPresence,
 }
 /// The Extras page: headers and items.
 pub fn rows() -> Vec<Result<Item, &'static str>> {
@@ -529,6 +552,9 @@ impl Item {
             Item::FpsLows => "Minimum and 1% low",
             Item::Keystrokes => "Keystrokes",
             Item::KeystrokesCps => "Clicks per second",
+            Item::NoAi => "No AI",
+            Item::AgentControl => "Agent Control",
+            Item::DiscordPresence => "Discord Rich Presence",
         }
     }
     /// The switch this setting belongs to: it does nothing while that is off.
@@ -542,7 +568,7 @@ impl Item {
             MouseTweaksWheel => MouseTweaks,
             SortKey => Sort,
             Fullbright | DynamicLights | Zoom | Minimap | Fps | Keystrokes | MouseTweaks | Sort
-            | AutoReconnect => {
+            | AutoReconnect | NoAi | AgentControl | DiscordPresence => {
                 return None;
             }
         })
@@ -586,6 +612,15 @@ impl Item {
             }
             Item::Keystrokes => "Movement keys, jump and mouse buttons as you press them.",
             Item::KeystrokesCps => "Clicks in the last second under each mouse button.",
+            Item::NoAi => {
+                "Hides and turns off every AI feature: agent control, horizon-ctl and the MCP servers. The launcher's switch too."
+            }
+            Item::DiscordPresence => {
+                "Shows Playing Horizon on your Discord profile while Discord runs: menus, single player or multiplayer, the dimension and the time played. Never a world's name or a server's address."
+            }
+            Item::AgentControl => {
+                "Your own AI agent can play this game through horizon-ctl or an MCP client, on this computer only."
+            }
         }
     }
     /// The frame-time cost the main switch of an extra shows.
@@ -616,6 +651,9 @@ impl Item {
             Item::MouseTweaks => e.mouse_tweaks,
             Item::MouseTweaksWheel => e.mouse_tweaks_wheel,
             Item::Sort => e.sort,
+            Item::NoAi => e.no_ai,
+            Item::AgentControl => e.agent_control,
+            Item::DiscordPresence => e.discord_presence,
             _ => return None,
         })
     }
@@ -671,6 +709,9 @@ impl Item {
             }
             Item::MinimapShape => e.minimap_round = !e.minimap_round,
             Item::MinimapZoom => e.minimap_zoom = next(&MINIMAP_ZOOMS, e.minimap_zoom, back),
+            Item::NoAi => e.no_ai = !e.no_ai,
+            Item::AgentControl => e.agent_control = !e.agent_control,
+            Item::DiscordPresence => e.discord_presence = !e.discord_presence,
             Item::ZoomKey | Item::SortKey => {}
         }
     }
@@ -694,6 +735,7 @@ mod tests {
         assert!(!d.fullbright && !d.dynamic_lights);
         assert!(!d.zoom && !d.fps && !d.keystrokes && !d.minimap && !d.auto_reconnect);
         assert!(!d.mouse_tweaks && !d.sort);
+        assert!(d.discord_presence);
         assert_eq!(Extras::parse(""), d);
         assert_eq!(Extras::parse(&d.serialize()), d);
         let mut e = d.clone();
@@ -719,6 +761,7 @@ mod tests {
         e.mouse_tweaks_wheel = false;
         e.sort = true;
         e.sort_key = "key.keyboard.r".into();
+        e.discord_presence = false;
         assert_eq!(Extras::parse(&e.serialize()), e);
     }
 

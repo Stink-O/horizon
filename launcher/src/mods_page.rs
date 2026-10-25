@@ -1,22 +1,30 @@
-//! The Mods page: search Modrinth (and CurseForge with a key) for resource packs, shader packs
-//! and modpacks Horizon loads, see where each comes from and how well it runs, install it with
-//! its checksum checked, and update or remove what was installed (`horizon_launcher::browser`).
+//! The Mods page: search Horizon's own registry for mods made for Horizon, or Modrinth
+//! (CurseForge: coming soon) for Java mods, modpacks and resource packs, see where each comes
+//! from and how well it runs (a Java mod's jar is checked first; a Horizon mod says whether it is
+//! signed and what it may do), install it with its checksum checked, turn Horizon mods on and
+//! off, and update or remove what was installed (`horizon_launcher::browser`). Imported modpacks
+//! are listed on its Modpacks tab.
 use super::servers_page::{type_key, Key};
 use super::*;
 use horizon_launcher::browser::{
-    self, curseforge::CurseForge, installed, Kind as PackKind, Project, Query, SourceId, Support,
+    self, horizon, installed, java, Kind as PackKind, Project, Query, SourceId, Support,
 };
 use horizon_launcher::modpacks;
+use horizon_port_pack::check::Check;
 use std::collections::HashMap;
 
-const KINDS: [(PackKind, &str); 3] = [
-    (PackKind::ResourcePack, "Resource packs"),
-    (PackKind::ShaderPack, "Shader packs"),
-    (PackKind::Modpack, "Modpacks"),
+/// The kinds, as the Mods page's tabs: name and icon.
+const KINDS: [(PackKind, &str, &str); 3] = [
+    (PackKind::Mod, "Mods", "box"),
+    (PackKind::Modpack, "Modpacks", "archive"),
+    (PackKind::ResourcePack, "Resource packs", "image"),
 ];
+/// Java mods checked at once.
+const CHECKING: usize = 2;
+/// The sources to pick from; CurseForge is shown beside them as coming soon.
 const SOURCES: [(SourceId, &str); 2] = [
     (SourceId::Modrinth, "Modrinth"),
-    (SourceId::CurseForge, "CurseForge"),
+    (SourceId::Horizon, "Horizon"),
 ];
 const PAGE: usize = 20;
 
@@ -26,12 +34,26 @@ pub(super) enum Event {
     Progress(String, f32),
     Done(Result<String, String>, bool),
     Updates(HashMap<(SourceId, String), String>),
+    /// A Java mod's check: its jar read, or why it couldn't be.
+    Checked((SourceId, String), Result<Box<Check>, String>),
+    /// What a Horizon registry project says before install: signed or not, what it may do.
+    About(HashMap<String, Vec<String>>),
+    /// Registry files taken down that the launcher turned off.
+    TakenDown(Vec<String>),
+    /// A project page's part, an image or a filter's values (`mods_project`).
+    Loaded(super::mods_project::Loaded),
+}
+
+/// Where a Java mod's check is.
+pub(super) enum Checking {
+    Running,
+    Done(Box<Check>),
+    Failed(String),
 }
 
 pub(super) struct Mods {
-    kind: PackKind,
-    source: SourceId,
-    curseforge: bool,
+    pub(super) kind: PackKind,
+    pub(super) source: SourceId,
     text: String,
     focus: FocusHandle,
     pub(super) focused: bool,
@@ -41,26 +63,53 @@ pub(super) struct Mods {
     searching: bool,
     searched: bool,
     results: Vec<Project>,
+    results_list: cull::Cull,
+    installed_list: cull::Cull,
+    pub(super) report_list: cull::Cull,
     more: bool,
     error: Option<String>,
     installed: Vec<installed::Entry>,
     loaded: bool,
     /// The project being installed, and the line and fraction of its download.
-    busy: Option<(String, String, f32)>,
+    pub(super) busy: Option<(String, String, f32)>,
     message: Option<Result<String, String>>,
     updates: HashMap<(SourceId, String), String>,
     confirm_remove: Option<String>,
-    tx: Sender<Event>,
+    /// Java mods' checks, by source and project.
+    pub(super) checks: HashMap<(SourceId, String), Checking>,
+    /// Horizon registry projects' trust and capabilities, by id ([`horizon::trust_and_capabilities`]).
+    pub(super) about: HashMap<String, Vec<String>>,
+    /// The project page, filters and images.
+    pub(super) browse: super::mods_project::Browse,
+    pub(super) tx: Sender<Event>,
     rx: Receiver<Event>,
 }
 
 impl Mods {
+    pub(super) fn reset_lists(&self) {
+        self.results_list.reset();
+        self.installed_list.reset();
+        self.report_list.reset();
+    }
+
+    /// Whether the Modpacks tab is open (the sidebar marks the pack shown there).
+    pub(super) fn on_modpacks(&self) -> bool {
+        self.kind == PackKind::Modpack
+    }
+
     pub(super) fn new(cx: &mut App) -> Self {
         let (tx, rx) = channel();
         Self {
-            kind: PackKind::ResourcePack,
-            source: SourceId::Modrinth,
-            curseforge: CurseForge::from_env().is_some(),
+            kind: if std::env::var("HORIZON_LAUNCHER_PAGE").as_deref() == Ok("modpacks") {
+                PackKind::Modpack
+            } else {
+                PackKind::Mod
+            },
+            // `HORIZON_LAUNCHER_SOURCE=horizon` opens on Horizon's registry, for screenshots.
+            source: match std::env::var("HORIZON_LAUNCHER_SOURCE").as_deref() {
+                Ok("horizon") => SourceId::Horizon,
+                _ => SourceId::Modrinth,
+            },
             text: String::new(),
             focus: cx.focus_handle().tab_index(0).tab_stop(true),
             focused: false,
@@ -69,6 +118,9 @@ impl Mods {
             searching: false,
             searched: false,
             results: Vec::new(),
+            results_list: cull::Cull::default(),
+            installed_list: cull::Cull::default(),
+            report_list: cull::Cull::default(),
             more: false,
             error: None,
             installed: Vec::new(),
@@ -77,6 +129,9 @@ impl Mods {
             message: None,
             updates: HashMap::new(),
             confirm_remove: None,
+            checks: HashMap::new(),
+            about: HashMap::new(),
+            browse: Default::default(),
             tx,
             rx,
         }
@@ -86,10 +141,23 @@ impl Mods {
         self.focused = self.focus.is_focused(window);
     }
 
-    fn entry(&self, p: &Project) -> Option<&installed::Entry> {
+    pub(super) fn entry(&self, p: &Project) -> Option<&installed::Entry> {
         self.installed
             .iter()
             .find(|e| e.source == p.source && e.project == p.id)
+    }
+
+    /// How well a result runs: a Java mod's from its check once it has one.
+    pub(super) fn support(&self, p: &Project) -> Support {
+        let metadata = p.support();
+        if p.kind != PackKind::Mod || p.source == SourceId::Horizon || !metadata.installable() {
+            return metadata;
+        }
+        match self.checks.get(&(p.source, p.id.clone())) {
+            Some(Checking::Done(c)) => java::support_of(c),
+            Some(Checking::Failed(e)) => Support::Partial(format!("Not checked: {e}")),
+            _ => Support::Partial("Checking its jar…".into()),
+        }
     }
 }
 
@@ -112,9 +180,29 @@ fn short_sum(checksum: &str) -> String {
 }
 
 impl Launcher {
+    /// Opens the Mods page on its Modpacks tab, with the pack `slug` open when given (the
+    /// sidebar's packs and its + button).
+    pub(super) fn show_modpack(&mut self, slug: Option<String>) {
+        self.go(Page::Mods);
+        if slug.is_some() {
+            self.pack_open = slug;
+            self.mods.report_list.reset();
+        }
+        if self.mods.kind != PackKind::Modpack {
+            self.mods.kind = PackKind::Modpack;
+            self.mods.browse.filters = Default::default();
+            self.mods.browse.open = None;
+            if self.mods.loaded {
+                self.mods_search(0);
+            }
+        }
+    }
+
     /// Called with the launcher's other work: what the background sent.
     pub(super) fn mods_tick(&mut self) -> bool {
         let mut changed = false;
+        let mut to_check = Vec::new();
+        let mut loaded = Vec::new();
         while let Ok(event) = self.mods.rx.try_recv() {
             changed = true;
             let m = &mut self.mods;
@@ -126,8 +214,9 @@ impl Launcher {
                         Ok(found) => {
                             m.more = found.len() == PAGE;
                             m.results.truncate(offset);
-                            m.results.extend(found);
+                            m.results.extend(found.iter().cloned());
                             m.error = None;
+                            to_check.extend(found);
                         }
                         Err(e) => m.error = Some(e),
                     }
@@ -143,29 +232,71 @@ impl Launcher {
                     m.busy = None;
                     m.message = Some(result);
                     m.installed = installed::Installed::load(&backend::game_home()).entries;
+                    m.installed_list.reset();
                     if modpack {
                         // The Modpacks page reads its list again.
                         self.packs_loaded = None;
                     }
                 }
                 Event::Updates(found) => m.updates = found,
+                Event::Checked(key, result) => {
+                    let state = match result {
+                        Ok(c) => Checking::Done(c),
+                        Err(e) => Checking::Failed(e),
+                    };
+                    m.checks.insert(key, state);
+                }
+                Event::Loaded(l) => loaded.push(l),
+                Event::About(about) => {
+                    // Rows grow by a line: measure them again (`cull`).
+                    m.about.extend(about);
+                    m.results_list.reset();
+                }
+                Event::TakenDown(lines) => {
+                    m.message = Some(Ok(lines.join("\n")));
+                    m.installed = installed::Installed::load(&backend::game_home()).entries;
+                    m.installed_list.reset();
+                }
             }
+        }
+        // `HORIZON_LAUNCHER_PROJECT=<slug>` (with `HORIZON_LAUNCHER_PAGE=mods`): opens that
+        // project's page once a search finds it, for screenshots.
+        if self.mods.browse.open.is_none() {
+            if let Ok(want) = std::env::var("HORIZON_LAUNCHER_PROJECT") {
+                if let Some(p) = self
+                    .mods
+                    .results
+                    .iter()
+                    .find(|p| p.id == want || p.slug == want)
+                    .cloned()
+                {
+                    std::env::remove_var("HORIZON_LAUNCHER_PROJECT");
+                    self.mods_open(p);
+                }
+            }
+        }
+        self.mods_check(to_check);
+        for l in loaded {
+            self.mods_loaded(l);
         }
         changed
     }
 
-    fn mods_search(&mut self, offset: usize) {
+    pub(super) fn mods_search(&mut self, offset: usize) {
         let m = &mut self.mods;
         m.search += 1;
         m.searching = true;
         if offset == 0 {
             m.results.clear();
             m.more = false;
+            m.results_list.reset();
+            m.installed_list.reset();
         }
         let query = Query {
             everything: m.everything,
             offset,
             limit: PAGE,
+            filters: m.browse.filters.clone(),
             ..Query::new(&m.text, m.kind)
         };
         let (tx, search, source) = (m.tx.clone(), m.search, m.source);
@@ -173,7 +304,113 @@ impl Launcher {
             let result = browser::source(source)
                 .ok_or_else(|| format!("{} isn't set up.", source.label()))
                 .and_then(|s| s.search(&query));
+            let about: HashMap<String, Vec<String>> = match (&result, source) {
+                (Ok(found), SourceId::Horizon) => found
+                    .iter()
+                    .map(|p| (p.id.clone(), horizon::trust_and_capabilities(&p.id)))
+                    .collect(),
+                _ => HashMap::new(),
+            };
             let _ = tx.send(Event::Found(search, offset, result));
+            if !about.is_empty() {
+                let _ = tx.send(Event::About(about));
+            }
+        });
+    }
+
+    /// Reads the registry's index again when something installed came from it, and turns off
+    /// what it took down since (`horizon::turn_off_revoked`).
+    fn mods_taken_down(&mut self) {
+        if !self
+            .mods
+            .installed
+            .iter()
+            .any(|e| e.source == SourceId::Horizon)
+        {
+            return;
+        }
+        let tx = self.mods.tx.clone();
+        std::thread::spawn(move || {
+            let Ok(index) = horizon::index() else {
+                return;
+            };
+            let lines = horizon::turn_off_revoked(&index, &backend::game_home());
+            if !lines.is_empty() {
+                let _ = tx.send(Event::TakenDown(lines));
+            }
+        });
+    }
+
+    /// Turns a Horizon mod the browser installed on or off, as the game's Options > Mods does.
+    fn mods_switch(&mut self, e: &installed::Entry) {
+        let home = backend::game_home();
+        let Some(id) = horizon::mod_id(e) else {
+            return;
+        };
+        let on = !java::is_enabled(&home, id);
+        let revoked = horizon::known_index().and_then(|index| {
+            let hash = e.checksum.trim_start_matches("SHA-256:");
+            index.revoked(&e.project, hash).map(|r| r.reason.clone())
+        });
+        self.mods.message = Some(match revoked.filter(|_| on) {
+            Some(reason) => Err(format!("{} was taken down: {reason}", e.title)),
+            None => java::set_enabled(&home, id, on).map(|()| {
+                format!(
+                    "{} is {}. The game reads this when it starts.",
+                    e.title,
+                    if on { "on" } else { "off" }
+                )
+            }),
+        });
+    }
+
+    /// Checks the Java mods among `found` that aren't checked yet, a few at a time, on threads:
+    /// a cached check answers at once, else the jar is downloaded and read.
+    fn mods_check(&mut self, found: Vec<Project>) {
+        let m = &mut self.mods;
+        let todo: Vec<Project> = found
+            .into_iter()
+            .filter(|p| p.kind == PackKind::Mod && p.source != SourceId::Horizon)
+            .filter(|p| p.support().installable())
+            .filter(|p| !m.checks.contains_key(&(p.source, p.id.clone())))
+            .collect();
+        if todo.is_empty() {
+            return;
+        }
+        for p in &todo {
+            m.checks.insert((p.source, p.id.clone()), Checking::Running);
+        }
+        // A version other than 26.3 asked for: check the newest file for 1.21 and later.
+        let everything = m.everything || m.browse.filters.other_version();
+        let tx = m.tx.clone();
+        let queue = std::sync::Mutex::new(todo.into_iter());
+        std::thread::spawn(move || {
+            let home = backend::game_home();
+            std::thread::scope(|s| {
+                for _ in 0..CHECKING {
+                    s.spawn(|| {
+                        while let Some(p) = queue.lock().ok().and_then(|mut q| q.next()) {
+                            let result = browser::source(p.source)
+                                .ok_or_else(|| format!("{} isn't set up.", p.source.label()))
+                                .and_then(|source| {
+                                    java::check_project(&home, &*source, &p, everything, &|_| {})
+                                });
+                            // The project's page, if open, shows the verdict beside its version.
+                            if let Ok((version, check)) = &result {
+                                let key = (p.source, p.id.clone());
+                                let _ =
+                                    tx.send(Event::Loaded(super::mods_project::Loaded::Checked(
+                                        key,
+                                        version.id.clone(),
+                                        check.verdict,
+                                    )));
+                            }
+                            let result = result.map(|(_, check)| Box::new(check));
+                            let _ = tx.send(Event::Checked((p.source, p.id), result));
+                        }
+                    });
+                }
+            });
         });
     }
 
@@ -200,14 +437,20 @@ impl Launcher {
 
     /// Installs (or updates) a project on a thread: a pack into its folder, a modpack into
     /// Modpacks. `known` is the project when the page has it; else it is asked for first.
-    fn mods_install(&mut self, source: SourceId, id: String, known: Option<Project>) {
+    pub(super) fn mods_install(&mut self, source: SourceId, id: String, known: Option<Project>) {
         if self.mods.busy.is_some() {
             return;
         }
         self.mods.message = None;
         self.mods.busy = Some((id.clone(), format!("Asking {}…", source.label()), 0.));
         self.mods.updates.remove(&(source, id.clone()));
-        let (tx, everything) = (self.mods.tx.clone(), self.mods.everything);
+        let everything = self.mods.everything || self.mods.browse.filters.other_version();
+        // A modpack is ported for the selected version as soon as it is imported.
+        let resources = self
+            .selected()
+            .filter(|tag| backend::is_prepared(tag))
+            .map(|tag| backend::resources(tag));
+        let tx = self.mods.tx.clone();
         std::thread::spawn(move || {
             let last = std::cell::Cell::new(-1);
             let progress = |line: &str, f: f32| {
@@ -225,16 +468,26 @@ impl Launcher {
                         None => source.project(&id)?,
                     };
                     modpack = p.kind == PackKind::Modpack;
+                    if modpack && p.source == SourceId::Horizon {
+                        let pack = horizon::pack::install(&p.id, &progress)?;
+                        return Ok(format!(
+                            "Installed {} {} as its own profile with {}, each checked. Play it \
+                             from the list above.",
+                            pack.name,
+                            pack.version,
+                            pack.mods.join(", ")
+                        ));
+                    }
                     if modpack {
                         let folder = modpacks::ports_dir().join("downloads");
                         let file = installed::fetch_modpack(&*source, &p, &folder, &|f| {
                             progress(&p.title, f)
                         })?;
                         let log = |line: String| progress(&line, 1.);
-                        let pack = modpacks::import(&file, &log)?;
+                        let pack = modpacks::import_and_port(&file, resources.as_deref(), &log)?;
                         return Ok(format!(
-                            "{} is imported: open it on the Modpacks page to port it.",
-                            pack.title()
+                            "{} Play it from the list above.",
+                            modpacks::outcome(&pack)
                         ));
                     }
                     let home = backend::game_home();
@@ -243,12 +496,29 @@ impl Launcher {
                         .iter()
                         .map(|e| format!("{} {}", e.title, e.number))
                         .collect();
-                    let turn_on = match p.kind {
-                        PackKind::ShaderPack => "Video Settings > Shader Packs",
-                        _ => "Options > Resource Packs",
-                    };
+                    if p.source == SourceId::Horizon && p.kind == PackKind::Mod {
+                        return Ok(format!(
+                            "Installed {} into horizon-mods and turned it on, checksum checked \
+                             (Options > Mods in the game).",
+                            names.join(", ")
+                        ));
+                    }
+                    if p.kind == PackKind::Mod {
+                        let skipped = done.last().map_or(0, |e| e.skipped.len());
+                        return Ok(format!(
+                            "Ported {} into horizon-mods and turned on (Options > Mods in the \
+                             game).{}",
+                            names.join(", "),
+                            if skipped > 0 {
+                                " What didn't port is listed under Installed."
+                            } else {
+                                ""
+                            }
+                        ));
+                    }
                     Ok(format!(
-                        "Installed {}, checksums checked. Turn it on in the game: {turn_on}.",
+                        "Installed {}, checksums checked. Turn it on in the game: Options > \
+                         Resource Packs.",
                         names.join(", ")
                     ))
                 });
@@ -269,16 +539,17 @@ impl Launcher {
             .track_focus(&m.focus)
             .flex()
             .items_center()
+            .gap(px(10.))
             .w(px(320.))
-            .h(px(theme::FIELD))
+            .h(px(theme::FIELD + 4.))
             .px(px(12.))
             .overflow_hidden()
-            .rounded(px(theme::RADIUS))
-            .border_1()
-            .border_color(if focused { t.accent } else { t.rule })
-            .bg(t.surface)
+            .border_2()
+            .border_color(if focused { t.accent } else { t.outline })
+            .bg(t.well)
             .text_size(px(theme::UI.px))
             .cursor_text()
+            .child(blocks::icon("search", 18., t.muted))
             .child(if m.text.is_empty() && !focused {
                 div().text_color(t.muted).child("Search, then Enter")
             } else {
@@ -326,21 +597,27 @@ impl Launcher {
             self.mods.loaded = true;
             self.mods.installed = installed::Installed::load(&backend::game_home()).entries;
             self.mods_check_updates();
+            self.mods_taken_down();
             self.mods_search(0);
         }
         let header = page_header(
             "Mods",
-            "Resource packs, shader packs and modpacks that Horizon loads. Each file is checked \
+            "Mods made for Horizon from its own reviewed registry, and Java mods, modpacks and \
+             resource packs from Modrinth: Horizon ports what a Java mod carries (blocks, items, \
+             recipes, worldgen) and says before you install what runs. Each file is checked \
              against its source's checksum before it reaches your game folder.",
             &t,
         );
         let this = cx.entity().downgrade();
-        let kinds = segments("mods-kind", &KINDS, self.mods.kind, &t, {
+        let kinds = blocks::tabs("mods-kind", &KINDS, self.mods.kind, &t, {
             let this = this.clone();
             move |kind, _, cx| {
                 let _ = this.update(cx, |this, cx| {
                     if this.mods.kind != kind {
                         this.mods.kind = kind;
+                        // Categories and loaders differ by kind.
+                        this.mods.browse.filters = Default::default();
+                        this.mods.browse.open = None;
                         this.mods_search(0);
                     }
                     cx.notify();
@@ -365,26 +642,12 @@ impl Launcher {
                 this.mods_search(0);
                 cx.notify();
             }));
-        let source_note = if self.mods.curseforge {
-            segments("mods-source", &SOURCES, self.mods.source, &t, {
-                let this = this.clone();
-                move |source, _, cx| {
-                    let _ = this.update(cx, |this, cx| {
-                        if this.mods.source != source {
-                            this.mods.source = source;
-                            this.mods_search(0);
-                        }
-                        cx.notify();
-                    });
-                }
-            })
-            .into_any_element()
-        } else {
-            text(theme::CAPTION)
-                .text_color(t.muted)
-                .child("From Modrinth. CurseForge comes once the launcher has its API key.")
-                .into_any_element()
-        };
+        // CurseForge support is coming soon: shown, inert, never searched (like the Microsoft
+        // account's "Coming soon").
+        let source_note = div().flex().child(self.mods_source_switch(cx));
+        // The registry lists only what was made for Horizon: no "everything", no Modrinth filters.
+        let registry = self.mods.source == SourceId::Horizon;
+        let filters = (!registry).then(|| self.mods_filters(cx));
         let controls = div()
             .flex()
             .flex_col()
@@ -395,19 +658,44 @@ impl Launcher {
                     .flex_wrap()
                     .items_center()
                     .gap(px(12.))
-                    .child(kinds)
                     .child(self.mods_field(cx))
-                    .child(toggle),
+                    .when(!registry, |d| d.child(toggle)),
             )
-            .child(source_note);
-        let mut page = div()
-            .flex()
-            .flex_col()
-            .gap(px(32.))
-            .child(header)
-            .child(controls);
+            .child(source_note)
+            .children(filters);
+        // The kinds are inventory tabs on the panel that holds the open one.
+        let body = blocks::panel(&t).flex().flex_col().gap(px(24.)).p(px(20.));
+        let page = |body: Div| {
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(32.))
+                .child(header)
+                .child(div().flex().flex_col().child(kinds).child(body))
+        };
+        if let Some(project) = self.mods_project_page(cx) {
+            return page(body.children(self.mods_busy_plate()).child(project));
+        }
+        let mut body = body.children(self.mods_busy_plate());
+        if self.mods.kind == PackKind::Modpack {
+            body = body
+                .child(self.imported_packs(cx))
+                .child(div().h(px(2.)).bg(t.rule))
+                .child(section_title("Browse modpacks", "search", &t));
+        }
+        body = body.child(controls);
+        if let Some(list) = self.mods_installed_list(cx) {
+            body = body.child(list);
+        }
+        page(body.child(self.mods_results(cx)))
+    }
+
+    /// The install under way and the last install's answer.
+    pub(super) fn mods_busy_plate(&self) -> Vec<Div> {
+        let t = self.theme;
+        let mut out = Vec::new();
         if let Some((_, line, f)) = &self.mods.busy {
-            page = page.child(
+            out.push(
                 plate(&t)
                     .flex()
                     .flex_col()
@@ -424,22 +712,17 @@ impl Launcher {
             );
         }
         match &self.mods.message {
-            Some(Ok(done)) => {
-                page = page.child(
-                    plate(&t)
-                        .p(px(16.))
-                        .text_size(px(theme::UI.px))
-                        .text_color(t.ink)
-                        .child(done.clone()),
-                )
-            }
-            Some(Err(e)) => page = page.child(notice(e.clone(), &t)),
+            Some(Ok(done)) => out.push(
+                plate(&t)
+                    .p(px(16.))
+                    .text_size(px(theme::UI.px))
+                    .text_color(t.ink)
+                    .child(done.clone()),
+            ),
+            Some(Err(e)) => out.push(notice(e.clone(), &t)),
             None => {}
         }
-        if let Some(list) = self.mods_installed_list(cx) {
-            page = page.child(list);
-        }
-        page.child(self.mods_results(cx))
+        out
     }
 
     fn mods_installed_list(&self, cx: &mut Context<Self>) -> Option<Div> {
@@ -455,8 +738,8 @@ impl Launcher {
             return None;
         }
         let busy = self.mods.busy.is_some();
-        let mut list = div().flex().flex_col().border_t_1().border_color(t.rule);
-        for (i, e) in entries.into_iter().enumerate() {
+        let row = |i: usize| {
+            let e = entries[i];
             let key = (e.source, e.project.clone());
             let mut right = div().flex().items_center().gap(px(8.));
             if let Some(number) = self.mods.updates.get(&key) {
@@ -501,18 +784,47 @@ impl Launcher {
                         installed::remove(&home, &id).map(|e| format!("Removed {}.", e.title)),
                     );
                     this.mods.installed = installed::Installed::load(&home).entries;
+                    this.mods.installed_list.reset();
                     this.mods.confirm_remove = None;
                 } else {
                     this.mods.confirm_remove = Some(id.clone());
                 }
                 cx.notify();
             }));
+            if e.source == SourceId::Horizon && e.kind == PackKind::Mod {
+                let on = horizon::mod_id(e)
+                    .is_some_and(|id| java::is_enabled(&backend::game_home(), id));
+                let entry = e.clone();
+                right = right.child(
+                    div()
+                        .id(SharedString::from(format!("mods-switch-{}", e.project)))
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .cursor_pointer()
+                        // Its id sits under the row's own, so one name serves every row.
+                        .child(switch("mods-switch-knob", on, &t))
+                        .child(text(theme::LABEL).text_color(t.ink_soft).child(if on {
+                            "On"
+                        } else {
+                            "Off"
+                        }))
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.mods_switch(&entry);
+                            cx.notify();
+                        })),
+                );
+            }
             right = right.child(remove);
             let detail = div()
                 .flex()
                 .flex_col()
                 .child(format!(
-                    "{} · from {}{} · {}",
+                    "{}{} · from {}{} · {}",
+                    e.verdict
+                        .as_ref()
+                        .map(|v| format!("{v} · "))
+                        .unwrap_or_default(),
                     e.number,
                     e.source.label(),
                     if e.dependency {
@@ -522,19 +834,31 @@ impl Launcher {
                     },
                     e.file
                 ))
+                .children(e.skipped.iter().map(|s| {
+                    div()
+                        .text_color(t.ink_soft)
+                        .child(format!("Not ported: {s}"))
+                }))
                 .child(
                     div()
                         .font_family(theme::MONO)
                         .child(format!("checked: {}", short_sum(&e.checksum))),
                 );
-            list = list.child(index_row(
+            index_row(
                 i + 1,
                 e.title.clone(),
                 Some(detail.into_any_element()),
                 Some(right.into_any_element()),
                 &t,
-            ));
-        }
+            )
+        };
+        let list = self.mods.installed_list.column(
+            &self.content_scroll.handle,
+            entries.len(),
+            8.,
+            |index| self.mods.confirm_remove.as_ref() == Some(&entries[index].project),
+            row,
+        );
         Some(
             div()
                 .flex()
@@ -545,7 +869,7 @@ impl Launcher {
         )
     }
 
-    fn mods_results(&self, cx: &mut Context<Self>) -> Div {
+    fn mods_results(&mut self, cx: &mut Context<Self>) -> Div {
         let t = self.theme;
         let m = &self.mods;
         if let Some(e) = &m.error {
@@ -554,6 +878,8 @@ impl Launcher {
         if m.results.is_empty() {
             let line = if m.searching || !m.searched {
                 "Searching…"
+            } else if m.source == SourceId::Horizon {
+                "Nothing in Horizon's registry matches yet."
             } else if m.everything {
                 "Nothing found."
             } else {
@@ -561,20 +887,33 @@ impl Launcher {
             };
             return centered(line, &t);
         }
-        let busy = m.busy.as_ref().map(|b| b.0.as_str());
-        let mut list = div().flex().flex_col().border_t_1().border_color(t.rule);
-        for (i, p) in m.results.iter().enumerate() {
-            let support = p.support();
+        let result_count = m.results.len();
+        let rows = m.results_list.clone();
+        let scroll = self.content_scroll.handle.clone();
+        let row = |i: usize| {
+            let project = self.mods.results[i].clone();
+            let icon = self.mods_icon(&project, 56.);
+            let p = &project;
+            let m = &self.mods;
+            let busy = m.busy.as_ref().map(|b| b.0.as_str());
+            let support = m.support(p);
+            let checking = p.kind == PackKind::Mod
+                && p.source != SourceId::Horizon
+                && matches!(
+                    m.checks.get(&(p.source, p.id.clone())),
+                    None | Some(Checking::Running)
+                )
+                && p.support().installable();
             let color = match support {
                 Support::Works => t.success,
-                Support::Partial(_) => t.accent,
+                Support::Partial(_) => t.warn,
                 Support::No(_) => t.muted,
             };
-            let mut right = div()
-                .flex()
-                .items_center()
-                .gap(px(8.))
-                .child(caps(support.label()).flex_none().text_color(color));
+            let mut right = div().flex().items_center().gap(px(8.)).child(blocks::badge(
+                support.label(),
+                color,
+                &t,
+            ));
             let page_url = p.page.clone();
             if !page_url.is_empty() {
                 right = right.child(
@@ -591,6 +930,8 @@ impl Launcher {
                 right = right.child(caps("Installing").text_color(t.accent));
             } else if m.entry(p).is_some() {
                 right = right.child(caps("Installed").text_color(t.muted));
+            } else if checking {
+                right = right.child(caps("Checking").text_color(t.muted));
             } else if support.installable() {
                 let label = if p.kind == PackKind::Modpack {
                     "Import"
@@ -618,7 +959,9 @@ impl Launcher {
             if !p.author.is_empty() {
                 by.push(format!("by {}", p.author));
             }
-            by.push(format!("{} downloads", count(p.downloads)));
+            if p.source != SourceId::Horizon {
+                by.push(format!("{} downloads", count(p.downloads)));
+            }
             by.push(format!("from {}", p.source.label()));
             if !p.license.is_empty() {
                 by.push(p.license.clone());
@@ -632,16 +975,37 @@ impl Launcher {
                     support
                         .reason()
                         .map(|r| div().text_color(t.ink_soft).child(r.to_string())),
+                )
+                .children(
+                    m.about
+                        .get(&p.id)
+                        .filter(|_| p.source == SourceId::Horizon)
+                        .map(|lines| div().text_color(t.ink_soft).child(lines.join(" · "))),
                 );
-            list = list.child(index_row(
+            let open = p.clone();
+            let name = div()
+                .id(SharedString::from(format!("mods-open-{}", p.id)))
+                .flex()
+                .items_center()
+                .gap(px(12.))
+                .cursor_pointer()
+                .child(icon)
+                .child(div().hover(|s| s.underline()).child(p.title.clone()))
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    this.mods_open(open.clone());
+                    cx.notify();
+                }));
+            index_row(
                 i + 1,
-                p.title.clone(),
+                name,
                 Some(detail.into_any_element()),
                 Some(right.into_any_element()),
                 &t,
-            ));
-        }
+            )
+        };
+        let list = rows.column(&scroll, result_count, 8., |_| false, row);
         let mut out = div().flex().flex_col().child(list);
+        let m = &self.mods;
         if m.more {
             let mut more = button("mods-more", "More", Kind::Ghost, &t);
             if m.searching {
@@ -657,6 +1021,45 @@ impl Launcher {
         }
         out
     }
+}
+
+impl Launcher {
+    /// The source switch: Modrinth or Horizon's registry, CurseForge shown as coming soon and not
+    /// clickable, like the Microsoft account's "Coming soon".
+    fn mods_source_switch(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        let this = cx.entity().downgrade();
+        source_switch(&self.theme, self.mods.source, move |source, _, cx| {
+            let _ = this.update(cx, |this, cx| {
+                if this.mods.source != source {
+                    this.mods.source = source;
+                    this.mods.browse.filters = Default::default();
+                    this.mods.browse.open = None;
+                    this.mods_search(0);
+                }
+                cx.notify();
+            });
+        })
+    }
+}
+
+fn source_switch(
+    t: &Theme,
+    current: SourceId,
+    on_pick: impl Fn(SourceId, &mut Window, &mut App) + Clone + 'static,
+) -> Stateful<Div> {
+    let soon = div()
+        .flex()
+        .items_center()
+        .h(px(theme::SEGMENT))
+        .px(px(14.))
+        .pb(px(2.))
+        .opacity(theme::DISABLED)
+        .child(
+            blocks::pixel(14., FontWeight::MEDIUM)
+                .text_color(t.muted)
+                .child("CurseForge (coming soon)"),
+        );
+    segments("mods-source", &SOURCES, current, t, on_pick).child(soon)
 }
 
 #[cfg(test)]

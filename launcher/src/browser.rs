@@ -1,13 +1,17 @@
-//! The mod browser's sources: search Modrinth (and CurseForge, once a key exists) for what
+//! The mod browser's sources: search Modrinth (CurseForge support is coming soon) for what
 //! Horizon loads, say how well each result runs, and download a file only after its checksum
 //! matches (docs/mod-browser.md).
 //!
-//! Only what Horizon actually loads is offered: resource packs (`resourcepacks/`), Java shader
-//! packs (`shaderpacks/`, Iris and OptiFine) and modpacks (imported and ported on the Modpacks
-//! page). Java mod jars don't run in Horizon (docs/mods.md), so they are never searched.
+//! Offered: Java mods (Fabric, NeoForge, Forge), whose content Horizon ports and whose jar is
+//! checked before install ([`java`]), modpacks (imported and ported) and resource packs
+//! (`resourcepacks/`). Java code itself doesn't run in Horizon (docs/mods.md).
 pub mod curseforge;
+pub mod details;
 pub mod download;
+pub mod horizon;
+pub mod images;
 pub mod installed;
+pub mod java;
 pub mod modrinth;
 
 use serde::{Deserialize, Serialize};
@@ -21,27 +25,28 @@ pub const GAME: &str = "26.3";
 #[serde(rename_all = "kebab-case")]
 pub enum Kind {
     ResourcePack,
-    ShaderPack,
     Modpack,
+    /// A Java mod: its content is ported ([`java`]).
+    Mod,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 3] = [Kind::ResourcePack, Kind::ShaderPack, Kind::Modpack];
+    pub const ALL: [Kind; 3] = [Kind::Mod, Kind::Modpack, Kind::ResourcePack];
 
     pub fn label(self) -> &'static str {
         match self {
+            Kind::Mod => "Mods",
             Kind::ResourcePack => "Resource packs",
-            Kind::ShaderPack => "Shader packs",
             Kind::Modpack => "Modpacks",
         }
     }
 
-    /// The folder beside `options.txt` the file goes in; a modpack is imported instead.
+    /// The folder beside `options.txt` the file goes in; a modpack is imported and a mod
+    /// ported instead.
     pub fn folder(self) -> Option<&'static str> {
         match self {
             Kind::ResourcePack => Some("resourcepacks"),
-            Kind::ShaderPack => Some("shaderpacks"),
-            Kind::Modpack => None,
+            Kind::Modpack | Kind::Mod => None,
         }
     }
 }
@@ -52,6 +57,8 @@ impl Kind {
 pub enum SourceId {
     Modrinth,
     CurseForge,
+    /// Horizon's own registry of reviewed mods, modpacks and resource packs ([`horizon`]).
+    Horizon,
 }
 
 impl SourceId {
@@ -59,6 +66,7 @@ impl SourceId {
         match self {
             SourceId::Modrinth => "Modrinth",
             SourceId::CurseForge => "CurseForge",
+            SourceId::Horizon => "Horizon",
         }
     }
 }
@@ -110,7 +118,7 @@ pub struct Project {
     pub icon: Option<String>,
     pub license: String,
     pub kind: Kind,
-    /// The Minecraft versions its files list, and the loaders (`iris`, `optifine`, `minecraft`...).
+    /// The Minecraft versions its files list, and the loaders (`fabric`, `neoforge`, `minecraft`...).
     pub game_versions: Vec<String>,
     pub loaders: Vec<String>,
 }
@@ -128,6 +136,8 @@ pub struct FileRef {
     pub name: String,
     pub size: u64,
     pub sha512: Option<String>,
+    /// What Horizon's registry lists.
+    pub sha256: Option<String>,
     pub sha1: Option<String>,
     pub primary: bool,
 }
@@ -135,11 +145,13 @@ pub struct FileRef {
 impl FileRef {
     /// The strongest checksum the source gives: what the download is checked against.
     pub fn checksum(&self) -> Option<(&'static str, &str)> {
-        match (&self.sha512, &self.sha1) {
-            (Some(h), _) => Some(("SHA-512", h)),
-            (None, Some(h)) => Some(("SHA-1", h)),
-            (None, None) => None,
-        }
+        [
+            ("SHA-512", &self.sha512),
+            ("SHA-256", &self.sha256),
+            ("SHA-1", &self.sha1),
+        ]
+        .into_iter()
+        .find_map(|(algo, h)| Some((algo, h.as_deref()?)))
     }
 }
 
@@ -173,11 +185,12 @@ impl Version {
 pub struct Query {
     pub text: String,
     pub kind: Kind,
-    /// Off: only what runs (made for [`GAME`], Iris or OptiFine shaders). On: everything of the
-    /// kind, each result marked with how well it runs.
+    /// Off: only what runs (made for [`GAME`]). On: everything of the kind, each result marked
+    /// with how well it runs.
     pub everything: bool,
     pub offset: usize,
     pub limit: usize,
+    pub filters: details::Filters,
 }
 
 impl Query {
@@ -188,6 +201,7 @@ impl Query {
             everything: false,
             offset: 0,
             limit: 20,
+            filters: details::Filters::default(),
         }
     }
 }
@@ -199,6 +213,17 @@ pub trait Source: Send + Sync {
     fn project(&self, id: &str) -> Result<Project, String>;
     /// Versions, newest first.
     fn versions(&self, project: &Project) -> Result<Vec<Version>, String>;
+    /// The project's page: description, gallery, links, authors.
+    fn details(&self, project: &Project) -> Result<details::Details, String> {
+        Ok(details::Details {
+            body: project.summary.clone(),
+            ..details::Details::default()
+        })
+    }
+    /// The values the search's filters can take for `kind`.
+    fn tags(&self, _kind: Kind) -> Result<details::Tags, String> {
+        Ok(details::Tags::default())
+    }
     /// Downloads one of its files into `folder`, checked ([`download::fetch`]).
     fn fetch(
         &self,
@@ -210,13 +235,14 @@ pub trait Source: Send + Sync {
     }
 }
 
-/// The sources this launcher can use: Modrinth always, CurseForge when it has an API key.
+/// What the launcher says wherever CurseForge would be.
+pub const CURSEFORGE_SOON: &str = "CurseForge support is coming soon.";
+
+/// The sources this launcher uses: Modrinth and Horizon's registry. CurseForge support is coming
+/// soon: its API needs a paid key, so no search or install goes to it; `curseforge` is kept for
+/// then.
 pub fn sources() -> Vec<Box<dyn Source>> {
-    let mut all: Vec<Box<dyn Source>> = vec![Box::new(modrinth::Modrinth)];
-    if let Some(cf) = curseforge::CurseForge::from_env() {
-        all.push(Box::new(cf));
-    }
-    all
+    vec![Box::new(modrinth::Modrinth), Box::new(horizon::Registry)]
 }
 
 /// The source of that id, when this launcher can use it.
@@ -224,11 +250,17 @@ pub fn source(id: SourceId) -> Option<Box<dyn Source>> {
     sources().into_iter().find(|s| s.id() == id)
 }
 
-/// The loaders a Java shader pack may name that Horizon translates.
-const SHADER_LOADERS: [&str; 2] = ["iris", "optifine"];
-
 /// How well a project of `kind` made for `game_versions` and `loaders` runs in Horizon.
 pub fn support(kind: Kind, game_versions: &[String], loaders: &[String]) -> Support {
+    if loaders.iter().any(|l| l == horizon::LOADER) {
+        // Made for Horizon and reviewed: it runs when it is for the version Horizon plays.
+        return match newest_release(game_versions)
+            .filter(|_| !game_versions.iter().any(|v| v == GAME))
+        {
+            Some(other) => Support::No(format!("Made for Horizon on {other}.")),
+            None => Support::Works,
+        };
+    }
     match kind {
         Kind::ResourcePack => {
             if game_versions.iter().any(|v| v == GAME) {
@@ -242,25 +274,34 @@ pub fn support(kind: Kind, game_versions: &[String], loaders: &[String]) -> Supp
                 Support::Partial("Lists no Minecraft version.".into())
             }
         }
-        Kind::ShaderPack => {
-            if loaders.iter().any(|l| SHADER_LOADERS.contains(&l.as_str())) {
-                Support::Partial(
-                    "Java shader packs are translated: their full-screen passes draw, the world \
-                     and shadow passes don't yet (BSL and Complementary tested)."
-                        .into(),
-                )
-            } else {
-                let named = loaders.first().map(String::as_str).unwrap_or("unknown");
+        Kind::Modpack => {
+            Support::Partial("Horizon runs the mods it can port, from your own downloads.".into())
+        }
+        Kind::Mod => {
+            if !loaders.iter().any(|l| java::LOADERS.contains(&l.as_str())) {
+                Support::No("Not a Fabric, NeoForge or Forge mod.".into())
+            } else if !game_versions.iter().any(|v| portable_version(v)) {
+                let newest = newest_release(game_versions).unwrap_or("an unknown version");
                 Support::No(format!(
-                    "A shader pack for {named}: Horizon runs Iris and OptiFine packs only."
+                    "Made for {newest}: Horizon ports mods made for 1.21 and later."
                 ))
+            } else {
+                Support::Partial(
+                    "Not checked yet: the launcher reads its jar to say what of it ports.".into(),
+                )
             }
         }
-        Kind::Modpack => Support::Partial(
-            "Imported on the Modpacks page: Horizon runs the mods it can port, from your own \
-             downloads."
-                .into(),
-        ),
+    }
+}
+
+/// A Minecraft version whose mods port-pack carries over: 1.21 and later (the data folders
+/// took their current names in 1.21).
+pub fn portable_version(v: &str) -> bool {
+    let parts: Vec<u32> = v.split('.').map_while(|p| p.parse().ok()).collect();
+    match parts.as_slice() {
+        [1, minor, ..] => *minor >= 21 && v.split('.').count() == parts.len(),
+        [year, ..] => *year >= 26 && v.split('.').count() == parts.len(),
+        [] => false,
     }
 }
 
@@ -286,9 +327,29 @@ pub fn pick(kind: Kind, versions: &[Version], everything: bool) -> Option<&Versi
     let mut usable = versions
         .iter()
         .filter(|v| v.blocked.is_none() && v.file().is_some());
+    if versions
+        .iter()
+        .any(|v| v.loaders.iter().any(|l| l == horizon::LOADER))
+    {
+        return usable.find(|v| v.game_versions.iter().any(|g| g == GAME));
+    }
+    if kind == Kind::Mod {
+        let java = |v: &&Version| {
+            v.loaders
+                .iter()
+                .any(|l| java::LOADERS.contains(&l.as_str()))
+        };
+        let made_for = |v: &&Version| v.game_versions.iter().any(|g| g == GAME);
+        let ported = |v: &&Version| v.game_versions.iter().any(|g| portable_version(g));
+        return usable
+            .clone()
+            .filter(java)
+            .find(made_for)
+            .or_else(|| usable.filter(java).find(|v| everything && ported(v)));
+    }
     let runs = |v: &&Version| match support(kind, &v.game_versions, &v.loaders) {
         Support::Works => true,
-        // A modpack's version is for its own Minecraft; any shader pack Horizon translates.
+        // A modpack's version is for its own Minecraft.
         Support::Partial(_) => kind != Kind::ResourcePack,
         Support::No(_) => false,
     };

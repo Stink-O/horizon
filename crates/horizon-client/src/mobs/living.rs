@@ -167,9 +167,9 @@ impl MobWorld<'_> {
                     let Ok(block) = self.collision.collision_block(state) else {
                         continue;
                     };
-                    if !block.large_collision_shape
-                        && !block.moving_piston
-                        && !(column && meets(Axis::Y, y))
+                    if !(block.large_collision_shape
+                        || block.moving_piston
+                        || (column && meets(Axis::Y, y)))
                     {
                         continue;
                     }
@@ -832,6 +832,9 @@ impl Mob {
         };
     }
     pub fn jump_from_ground(&mut self, w: &MobWorld) {
+        // LivingEntity.jumpFromGround (and the rabbit's and cubes' own,
+        // which call it or do the same): needsSync.
+        self.needs_sync = true;
         if self.species() == super::Species::Rabbit {
             super::rabbit::jump(self, w);
             return;

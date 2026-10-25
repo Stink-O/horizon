@@ -1,8 +1,7 @@
 //! Resolution scale and FXAA (Horizon settings): the world renders into its
 //! own target at the scaled size, then one full-screen pass copies or
-//! anti-aliases it onto the screen, under the hand and HUD. A shader pack
-//! also needs the target (its stages read the world's colour and depth).
-//! With none of them on, the world renders straight to the screen as before.
+//! anti-aliases it onto the screen, under the hand and HUD. With neither on,
+//! the world renders straight to the screen.
 
 struct WorldTarget {
     size: [u32; 2],
@@ -21,9 +20,6 @@ pub struct Post {
     pub scale: f32,
     pub antialias: bool,
     target: Option<WorldTarget>,
-    /// Bumped each time the world's target is made anew: bindings of the old
-    /// one (shader pack stages, a mod's pass) must be made again.
-    generation: u64,
 }
 
 impl Post {
@@ -100,18 +96,19 @@ impl Post {
             scale: 1.0,
             antialias: false,
             target: None,
-            generation: 0,
         }
     }
+
     /// The world's colour and depth targets this frame, or `None` to draw
-    /// it straight to the screen. `pack`: a shader pack runs this frame.
+    /// it straight to the screen.
+    /// `always`: a target even at scale 1 without FXAA (a shader pack reads it).
     pub fn prepare(
         &mut self,
         device: &wgpu::Device,
         window: [u32; 2],
-        pack: bool,
+        always: bool,
     ) -> Option<(wgpu::TextureView, wgpu::TextureView)> {
-        if self.scale == 1.0 && !self.antialias && !pack {
+        if self.scale == 1.0 && !self.antialias && !always {
             self.target = None;
             return None;
         }
@@ -122,32 +119,32 @@ impl Post {
                 height: size[1],
                 depth_or_array_layers: 1,
             };
-            let texture = |label, format, usage| {
-                device
-                    .create_texture(&wgpu::TextureDescriptor {
-                        label: Some(label),
-                        size: extent,
-                        mip_level_count: 1,
-                        sample_count: 1,
-                        dimension: wgpu::TextureDimension::D2,
-                        format,
-                        usage,
-                        view_formats: &[],
-                    })
-                    .create_view(&Default::default())
+            let make_tex = |label, format, usage| {
+                device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some(label),
+                    size: extent,
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format,
+                    usage,
+                    view_formats: &[],
+                })
             };
-            let color = texture(
+            let color = make_tex(
                 "Scaled world",
                 self.format,
                 wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            );
-            let depth = texture(
+            )
+            .create_view(&Default::default());
+            // TEXTURE_BINDING: occlusion culling reads it.
+            let depth = make_tex(
                 "Scaled world depth",
                 wgpu::TextureFormat::Depth32Float,
                 wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            );
+            )
+            .create_view(&Default::default());
             let group = self.bind(device, &color);
-            self.generation += 1;
             self.target = Some(WorldTarget {
                 size,
                 color,
@@ -159,14 +156,12 @@ impl Post {
             .as_ref()
             .map(|t| (t.color.clone(), t.depth.clone()))
     }
-    /// The world target's size, once `prepare` made one.
-    /// Changes whenever the world's target is made anew.
-    pub fn generation(&self) -> u64 {
-        self.generation
-    }
+
+    /// The size of the world's own target, when it has one.
     pub fn size(&self) -> Option<[u32; 2]> {
         self.target.as_ref().map(|t| t.size)
     }
+
     /// Bindings that copy (or anti-alias) `view` onto the screen in `finish_with`.
     pub fn bind(&self, device: &wgpu::Device, view: &wgpu::TextureView) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -184,11 +179,13 @@ impl Post {
             ],
         })
     }
+
     /// Draw the scaled world onto `screen`.
     pub fn finish(&self, encoder: &mut wgpu::CommandEncoder, screen: &wgpu::TextureView) {
         let Some(target) = &self.target else { return };
         self.finish_with(encoder, screen, &target.group);
     }
+
     /// Draw what `group` binds (`bind`) onto `screen`.
     pub fn finish_with(
         &self,

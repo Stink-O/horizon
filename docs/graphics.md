@@ -2,17 +2,17 @@
 
 ## Settings
 
-In the Horizon menu style, the Options screen's **Video** section holds the graphics settings, with a Simple / Advanced switch at the top (remembered between sessions):
+Horizon's graphics settings are two screens built from vanilla's widgets, opened from the top of **Video Settings** (**Horizon Graphics...** and **Advanced Graphics...**) or from **Options → Horizon Settings...**:
 
-- **Simple**: a preset (Performance, Balanced, Quality, Ultra or Custom), render distance, LOD distance, FOV, max framerate, VSync and GUI scale.
-- **Advanced**: every setting, grouped under Rendering, Quality, Display, Preferences, Performance and Overlay.
+- **Graphics** (Simple): a preset (Performance, Balanced, Quality, Ultra or Custom) and LOD distance.
+- **Advanced Graphics**: every Horizon setting, grouped under Rendering, Quality, Display, Preferences, Performance and Overlay.
 
-In the Classic style, Video Settings starts with two buttons opening the same settings as vanilla-looking screens.
+Vanilla's own settings (render distance, FOV, framerate, VSync, GUI scale, smooth lighting...) stay where vanilla has them, in Video Settings; both screens leave them out.
 
 Every row has a one-line description and its cost in frame time (none, low, medium, high, or saves time for culling that makes frames faster), and applies at once, except worker threads, which apply at the next start. A preset sets the quality settings together; changing one of them turns it into Custom. Display preferences (FOV, framerate, VSync, GUI scale, fullscreen, present mode, pacing) leave the preset as it is.
 
-![Simple](media/settings-simple.png)
-![Advanced](media/settings-advanced.png)
+![Video Settings, with Horizon's buttons at the top](media/settings-simple.png)
+![Advanced Graphics](media/settings-advanced.png)
 
 | Group | Setting | Stored in |
 | --- | --- | --- |
@@ -29,7 +29,7 @@ Every row has a one-line description and its cost in frame time (none, low, medi
 
 **Battery mode** (Performance, off by default) is for laptops and handhelds: at most 60 frames per second in a world, 30 in menus without a world or while another window has focus, and half the automatic worker threads (chunks load slower). It changes only when frames are drawn: what they show and the game's 20 ticks per second stay as they are.
 
-Which settings each level shows, their descriptions and costs are in `crates/horizon-client/src/graphics_ui.rs` (`rows`); the Horizon shell draws them in `options_horizon.rs` with `ui_theme::described_row`, and the Classic screens use `graphics_style.rs`.
+Which settings each screen shows, their descriptions and costs are in `crates/horizon-client/src/graphics_ui.rs` (`rows`); `graphics_style.rs` draws them.
 
 ## Distant terrain
 
@@ -44,8 +44,6 @@ A separate bounded worker refines the nearest LOD levels with disposable ordinar
 Coverage and detail improve progressively; a large selected radius does not mean all its target detail is already resident. The control status reports target and sampled target tile counts separately. Direct far sampling approximates vertical noise interpolation, fluid boundaries and lighting; surface slopes and column extensions, small features and partial block shapes can differ. Unexplored distant structures are not synthesized by the direct path, and native decoration order can differ from subsequent gameplay generation. Horizon-supported data-driven noise and tree configurations can be reused; this does not execute arbitrary Fabric/NeoForge worldgen or structure mods.
 
 Ordinary Overworld atmospheric fog extends with the selected LOD distance. Fog Off disables distance haze at large ranges too; fluid, darkness and boss fog retain their limits.
-
-LOD terrain enters the existing world colour and depth passes, so supported shader-pack postprocessing can see it. This does not add Iris material passes or shadow maps: Java packs still have the [existing fullscreen-pass limitations](shader-packs.md). Shader appearance and transitions need testing with the selected pack.
 
 The setting is stored as `lodDistance` in `horizon-graphics.txt`; `0` disables it. Existing `renderDistance` in `options.txt` keeps its normal meaning for full chunks.
 

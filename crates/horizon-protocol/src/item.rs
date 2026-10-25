@@ -2,10 +2,12 @@
 //! item's registry id and a data component patch, plus the hashed form the
 //! client sends back in container clicks (HashedStack).
 use crate::{
-    Error, Result,
+    Result,
     buf::{Codec, Reader, Writer},
 };
 use horizon_world::nbt::Tag;
+
+mod skip;
 
 /// minecraft:data_component_type registry ids (26.3).
 pub mod component {
@@ -32,8 +34,10 @@ pub mod component {
     pub const DYED_COLOR: i32 = 47;
     pub const MAP_ID: i32 = 48;
     pub const MAP_POST_PROCESSING: i32 = 50;
+    pub const CHARGED_PROJECTILES: i32 = 51;
     pub const WRITABLE_BOOK_CONTENT: i32 = 56;
     pub const WRITTEN_BOOK_CONTENT: i32 = 57;
+    pub const TRIM: i32 = 58;
 }
 
 /// A written book's content (`WrittenBookContent.STREAM_CODEC`): the
@@ -75,6 +79,17 @@ pub enum Component {
     /// `WritableBookContent`: the pages (raw text).
     WritableBook(Vec<String>),
     WrittenBook(WrittenBook),
+    /// `ChargedProjectiles`: a loaded crossbow's ammunition, as templates.
+    Stacks(Vec<Stack>),
+    /// `ArmorTrim` naming its material and pattern by registry id (`trim_material`,
+    /// `trim_pattern`); a trim with a direct holder stays [`Component::Raw`].
+    Trim {
+        material: i32,
+        pattern: i32,
+    },
+    /// A component Horizon reads past without interpreting it: its encoded
+    /// bytes, written back as they came.
+    Raw(Vec<u8>),
 }
 
 /// `Filterable.streamCodec`: the raw value, then an optional filtered one
@@ -124,6 +139,10 @@ impl Component {
                     pages,
                     resolved: r.bool()?,
                 })
+            }
+            CHARGED_PROJECTILES => {
+                let n = r.count(1024)?;
+                Self::Stacks((0..n).map(|_| Template::read(r)).collect::<Result<_>>()?)
             }
             DYED_COLOR => Self::Int(r.i32()?),
             UNBREAKABLE | CREATIVE_SLOT_LOCK => Self::Unit,
@@ -217,11 +236,35 @@ impl Component {
                     hidden: (0..n).map(|_| r.varint()).collect::<Result<_>>()?,
                 }
             }
-            other => return Err(Error::new(format!("unsupported item component {other}"))),
+            // ArmorTrim.STREAM_CODEC: two holders, each a reference's id plus
+            // one. A direct material or pattern has no registry name: read past.
+            TRIM => {
+                let start = r.position();
+                skip::component(TRIM, r)?;
+                let bytes = r.since(start);
+                let mut ids = Reader::new(bytes);
+                match (ids.varint(), ids.varint()) {
+                    (Ok(material @ 1..), Ok(pattern @ 1..)) if ids.remaining() == 0 => Self::Trim {
+                        material: material - 1,
+                        pattern: pattern - 1,
+                    },
+                    _ => Self::Raw(bytes.to_vec()),
+                }
+            }
+            other => {
+                let start = r.position();
+                skip::component(other, r)?;
+                Self::Raw(r.since(start).to_vec())
+            }
         })
     }
     fn write(&self, kind: i32, w: &mut Writer) {
         match self {
+            Self::Raw(bytes) => w.bytes(bytes),
+            Self::Trim { material, pattern } => {
+                w.varint(material + 1);
+                w.varint(pattern + 1);
+            }
             Self::Int(v) if kind == component::DYED_COLOR => w.i32(*v),
             Self::Int(v) => w.varint(*v),
             Self::Unit => {}
@@ -282,6 +325,10 @@ impl Component {
                 w.bool(*hide);
                 w.varint(hidden.len() as i32);
                 hidden.iter().for_each(|h| w.varint(*h));
+            }
+            Self::Stacks(stacks) => {
+                w.varint(stacks.len() as i32);
+                stacks.iter().for_each(|s| Template::write(s, w));
             }
             Self::WritableBook(pages) => {
                 w.varint(pages.len() as i32);
@@ -534,6 +581,21 @@ mod tests {
     }
 
     #[test]
+    fn charged_projectiles_are_item_stack_templates() {
+        // A crossbow (id 7) loaded with one arrow (id 9): ChargedProjectiles
+        // is a list of ItemStackTemplate, the item before the count.
+        let bytes = [1, 7, 1, 0, 51, 1, 9, 1, 0, 0];
+        let stack = Slot::read(&mut Reader::new(&bytes)).unwrap().unwrap();
+        assert_eq!(
+            stack.component(component::CHARGED_PROJECTILES),
+            Some(&Component::Stacks(vec![Stack::new(9, 1)]))
+        );
+        let mut w = Writer::new();
+        Slot::write(&Some(stack), &mut w);
+        assert_eq!(w.data, bytes);
+    }
+
+    #[test]
     fn filtered_book_pages_are_read_and_dropped() {
         // A writable book with one page "hi" and its filtered "**".
         let bytes = [1, 7, 1, 0, 56, 1, 2, b'h', b'i', 1, 2, b'*', b'*'];
@@ -556,7 +618,8 @@ mod tests {
 
     #[test]
     fn unknown_components_are_errors() {
-        let bytes = [1, 5, 1, 0, 99];
+        // 122 is past DataComponents' last id (cushion_color, 121).
+        let bytes = [1, 5, 1, 0, 122];
         assert!(Slot::read(&mut Reader::new(&bytes)).is_err());
     }
 
@@ -604,5 +667,45 @@ mod tests {
             profile.properties,
             [("textures".to_owned(), "x".to_owned(), None)]
         );
+    }
+
+    #[test]
+    fn components_read_past_keep_their_bytes() {
+        // Vanilla 26.3's encoding (tools/test_item_wire_parity.py) of a chestplate's
+        // armour trim (decoded: both holders are references), a banner's patterns
+        // (one direct), a pot's sherds and a stew's effects: one server's
+        // inventory, recipe book and advancements had them.
+        for (hex, kind) in [
+            ("01bd0801003a0502", 58),
+            ("01890b01004a02200e000b6d696e6563726166743a7801790b", 74),
+            ("01880301004c01f60801000001be0c0100000001d30c010000", 76),
+            ("01a408010037020f6412a001", 55),
+        ] {
+            let bytes: Vec<u8> = (0..hex.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+                .collect();
+            let mut r = Reader::new(&bytes);
+            let stack = Slot::read(&mut r).unwrap();
+            assert_eq!(r.remaining(), 0, "component {kind}");
+            let expected = |c: &Component| match kind {
+                58 => {
+                    *c == Component::Trim {
+                        material: 4,
+                        pattern: 1,
+                    }
+                }
+                _ => matches!(c, Component::Raw(_)),
+            };
+            assert!(
+                stack
+                    .as_ref()
+                    .and_then(|s| s.component(kind))
+                    .is_some_and(expected)
+            );
+            let mut w = Writer::new();
+            Slot::write(&stack, &mut w);
+            assert_eq!(w.data, bytes, "component {kind}");
+        }
     }
 }

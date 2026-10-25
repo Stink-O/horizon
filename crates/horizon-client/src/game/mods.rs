@@ -2,51 +2,88 @@
 //! their tick, frame, chat and command hooks, their HUD panels and what
 //! they print. With no mod on, `horizon_mods::Mods` holds no engine and
 //! every hook here returns after one check.
-use super::{Game, ItemStack, Screen};
+//!
+//! Code mods run only in builds with the `mods` feature (release builds):
+//! without it the game links no wasmtime, and every hook does nothing.
+//! Content mods (`content_root`) load in every build.
+use super::Game;
 use horizon_client::{
     command::{Dispatcher, vanilla},
-    extras::Corner,
-    extras_hud::{self, Corners},
-    hud::{HudBatch, rgba},
-    keybinds,
-    mod_list::{self, Installed},
-    text::{self, Text},
+    extras_hud::Corners,
+    hud::HudBatch,
+    mod_list,
 };
-use horizon_mods::{
-    Click, Clock, Draw, HeldItem, Hit, InputEvent, ItemUse, Mods, Output, Player, Snapshot, Status,
-};
-use std::{
-    path::PathBuf,
-    time::{Duration, Instant},
-};
+use std::{path::PathBuf, time::Duration};
 use winit::{event::MouseButton, keyboard::KeyCode};
+#[cfg(feature = "mods")]
+use {
+    super::{ItemStack, Screen},
+    horizon_client::{
+        extras::Corner,
+        extras_hud,
+        hud::rgba,
+        keybinds,
+        mod_list::Installed,
+        text::{self, Text},
+    },
+    horizon_mods::{
+        Click, Clock, Draw, HeldItem, Hit, InputEvent, ItemUse, Mods, Output, Player, Snapshot,
+        Status,
+    },
+    std::time::Instant,
+};
 
 #[derive(Default)]
 pub(super) struct ModsState {
-    pub(super) mods: Mods,
+    #[cfg(feature = "mods")]
+    mods: Mods,
     /// `--dev-mod PATH`: always on, reloaded when rebuilt.
     pub(super) dev: Vec<PathBuf>,
     /// When dev mods were last checked for a rebuild.
+    #[cfg(feature = "mods")]
     checked: Option<Instant>,
     /// The chat's command tree while a running mod owns commands.
+    #[cfg(feature = "mods")]
     tree: Option<Dispatcher>,
     /// The mod whose screen is open (`Screen::Mod`).
+    #[cfg(feature = "mods")]
     pub(super) screen: Option<String>,
     /// The mod claiming the item in use (`Game.using`), for its `use-stop`.
+    #[cfg(feature = "mods")]
     pub(super) using: Option<String>,
 }
 impl ModsState {
     /// The chat's command tree: vanilla's, plus the running mods' commands.
     pub(super) fn dispatcher(&self) -> &Dispatcher {
-        self.tree
-            .as_ref()
-            .unwrap_or_else(|| vanilla::game_dispatcher())
+        #[cfg(feature = "mods")]
+        if let Some(tree) = &self.tree {
+            return tree;
+        }
+        vanilla::game_dispatcher()
+    }
+    /// Whether a mod runs: the chat keeps its lines for them.
+    pub(super) fn running(&self) -> bool {
+        #[cfg(feature = "mods")]
+        if self.mods.is_running() {
+            return true;
+        }
+        false
+    }
+    /// Whether a mod draws a HUD panel.
+    pub(super) fn has_panels(&self) -> bool {
+        #[cfg(feature = "mods")]
+        if self.mods.panels().next().is_some() {
+            return true;
+        }
+        false
     }
 }
 /// How often dev mods are checked for a rebuild.
+#[cfg(feature = "mods")]
 const RELOAD_CHECK: Duration = Duration::from_secs(1);
 
 /// A vanilla command name: mods may not take it.
+#[cfg(feature = "mods")]
 fn vanilla_command(name: &str) -> bool {
     let d = vanilla::game_dispatcher();
     d.nodes[0]
@@ -120,7 +157,51 @@ pub(super) fn content_root(
     }
 }
 
+/// A build without the `mods` feature: no mod runs.
+#[cfg(not(feature = "mods"))]
 impl Game<'_> {
+    /// Says why the installed and dev mods don't run.
+    pub(super) fn start_mods(&mut self) {
+        let dir = Self::options_path().with_file_name(mod_list::DIR);
+        let found = horizon_mods::find(&dir).len() + self.mods.dev.len();
+        if found > 0 {
+            log::warn!(
+                "Horizon: {found} mod(s) not started: this build has no mod runtime (build with --features mods)"
+            );
+        }
+    }
+    pub(super) fn sync_mods(&mut self) {}
+    pub(super) fn tick_mods(&mut self) {}
+    pub(super) fn mods_frame(&mut self, _elapsed: Duration) {}
+    pub(super) fn mod_command(&mut self, _command: &str) -> bool {
+        false
+    }
+    pub(super) fn mods_chat(&mut self, _line: &str) {}
+    pub(super) fn draw_mod_panels(&self, _batch: &mut HudBatch, _corners: &mut Corners) {}
+    pub(super) fn mod_post_pass(&self) -> Option<(std::sync::Arc<str>, u64, [f32; 16])> {
+        None
+    }
+    pub(super) fn mod_use_start(&mut self) -> bool {
+        false
+    }
+    pub(super) fn mod_use_tick(&mut self, _slot: usize, _ticks: u32, _released: bool) -> bool {
+        false
+    }
+    pub(super) fn mods_key(&mut self, _key: KeyCode, _pressed: bool, _repeat: bool) {}
+    pub(super) fn close_mod_screen(&mut self) {}
+    pub(super) fn mod_screen_click(&mut self, _button: MouseButton) {}
+    pub(super) fn draw_mod_screen(&self, _batch: &mut HudBatch) {}
+}
+
+#[cfg(feature = "mods")]
+impl Game<'_> {
+    /// A running mod's post pass (capability `render`): its source, the source's version and its parameters.
+    pub(super) fn mod_post_pass(&self) -> Option<(std::sync::Arc<str>, u64, [f32; 16])> {
+        self.mods
+            .mods
+            .post()
+            .map(|p| (p.source, p.version, p.params))
+    }
     /// Reads `horizon-mods/` and the dev mods, and starts the ones turned on.
     pub(super) fn start_mods(&mut self) {
         let dir = Self::options_path().with_file_name(mod_list::DIR);
@@ -456,6 +537,7 @@ impl Game<'_> {
     }
 }
 
+#[cfg(feature = "mods")]
 impl Game<'_> {
     // ---- capability `input` ------------------------------------------------
 
@@ -655,17 +737,19 @@ impl Game<'_> {
 
     /// `world.run-commands`: at operator level, silently, in order.
     fn run_mod_commands(&mut self, id: &str, commands: Vec<String>) {
+        // Single player's world is its server thread's: they run there, as the world's owner, in order, while the
+        // window goes on drawing (waiting for them would hold up the frame for as long as the server works).
+        if let Some(server) = &self.integrated {
+            server.execute(move |g| g.owner_commands_silently(&commands));
+            return;
+        }
         if self.remote.is_some() {
             log::warn!("[mod {id}] run-commands ignored: the world is on a remote server");
             return;
         }
-        if let Some(server) = &self.integrated {
-            server.call(move |g| g.run_commands_silently(&commands));
-            return;
-        }
         self.run_commands_silently(&commands);
     }
-    fn run_commands_silently(&mut self, commands: &[String]) {
+    pub(super) fn run_commands_silently(&mut self, commands: &[String]) {
         // Its own command budget: a mod's batch is not the tick's functions.
         let saved = std::mem::take(&mut self.exec);
         self.as_console(|g| {
@@ -688,6 +772,7 @@ impl Game<'_> {
 }
 
 /// The span a mod's command is timed under (`HORIZON_SPIKES`): what it runs, through any `execute ... run`.
+#[cfg(feature = "mods")]
 fn command_span(line: &str) -> &'static str {
     let run = line
         .rsplit(" run ")

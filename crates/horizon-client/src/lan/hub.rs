@@ -111,6 +111,8 @@ pub struct TickCtx<'a> {
     /// Block collisions, for ServerGamePacketListenerImpl's moved-wrongly
     /// check (none: moves are not checked against blocks).
     pub collision: Option<&'a BlockCollisionRegistry<'a>>,
+    /// The level's world border (PlayerList.sendLevelInfo sends it).
+    pub border: &'a crate::worldborder::WorldBorder,
 }
 
 /// What the gameplay code has to do for a guest.
@@ -171,13 +173,6 @@ pub struct Hub {
 
 fn string(s: &str) -> Tag {
     Tag::String(JavaString::from(s))
-}
-pub fn yellow_translation(key: &str, args: &[&str]) -> Tag {
-    let mut t = translatable(key, args);
-    if let Tag::Compound(map) = &mut t {
-        map.insert(JavaString::from("color"), string("yellow"));
-    }
-    t
 }
 
 /// Player.getDisplayName for a player in no team: the name, suggesting
@@ -356,7 +351,7 @@ impl Hub {
     pub fn stack(&mut self, s: &Option<ItemStack>) -> Option<horizon_protocol::item::Stack> {
         let id = s.as_ref().map(|s| self.item_id(&s.item))?;
         let sync = self.sync.clone();
-        stack_to_network(|_| id, |name| sync.id("minecraft:enchantment", name), s)
+        stack_to_network(|_| id, |registry, name| sync.id(registry, name), s)
     }
 
     pub fn broadcast(&self, packet: &C) {
@@ -842,6 +837,20 @@ impl Hub {
 
     /// ServerGamePacketListenerImpl.teleport: move the client and wait for its confirmation.
     pub fn teleport(&mut self, i: usize, position: Option<[f64; 3]>) {
+        self.teleport_relative(i, position, 0);
+    }
+
+    /// A teleport to `position` that keeps the player's motion and look
+    /// (`Relative.DELTA` and `Relative.ROTATION`: an End gateway's).
+    pub fn teleport_keeping_motion(&mut self, i: usize, position: [f64; 3]) {
+        use play::relative::{DELTA_X, DELTA_Y, DELTA_Z, ROTATE_DELTA, X_ROT, Y_ROT};
+        let relatives = Y_ROT | X_ROT | DELTA_X | DELTA_Y | DELTA_Z | ROTATE_DELTA;
+        self.teleport_relative(i, Some(position), relatives);
+    }
+
+    /// ServerGamePacketListenerImpl.teleport with `relatives`: the rotation
+    /// and motion they name are sent as zero changes.
+    fn teleport_relative(&mut self, i: usize, position: Option<[f64; 3]>, relatives: i32) {
         let ticks = self.ticks;
         let g = &mut self.guests[i];
         g.teleport_tick = ticks;
@@ -852,13 +861,14 @@ impl Hub {
         g.teleport_counter = (g.teleport_counter + 1) & 0x7FFF_FFFF;
         let id = g.teleport_counter;
         g.awaiting_teleport = Some((id, g.position));
+        let turn = relatives & (play::relative::Y_ROT | play::relative::X_ROT) != 0;
         g.send(&C::PlayerPosition(play::PlayerPosition {
             teleport: id,
             position: g.position,
             delta: [0.0; 3],
-            yaw: g.yaw,
-            pitch: g.pitch,
-            relatives: 0,
+            yaw: if turn { 0.0 } else { g.yaw },
+            pitch: if turn { 0.0 } else { g.pitch },
+            relatives,
         }));
     }
 
@@ -883,17 +893,7 @@ impl Hub {
     fn send_level_info(&mut self, i: usize, ctx: &TickCtx) {
         let spawn = ctx.spawn;
         let g = &self.guests[i];
-        g.send(&C::InitializeBorder(play::InitializeBorder {
-            center_x: 0.0,
-            center_z: 0.0,
-            old_size: 59_999_968.0,
-            new_size: 59_999_968.0,
-            lerp_time: 0,
-            absolute_max_size: 29_999_984,
-            warning_blocks: 5,
-            // WorldBorder.DEFAULT_WARNING_TIME, in ticks.
-            warning_time: 300,
-        }));
+        g.send(&C::InitializeBorder(super::border::initialize(ctx.border)));
         g.send(&self.time_packet(ctx.world, ctx.clock_rate));
         g.send(&self.default_spawn(spawn));
         let w = &ctx.world.weather;
@@ -1345,21 +1345,6 @@ impl Hub {
         (!batch.is_empty()).then_some(batch)
     }
 
-    /// Resend a chunk to everyone who has it (a block entity changed, relight).
-    pub fn resend_chunk(&mut self, world: &World, x: i32, z: i32) {
-        let Some(chunk) = world.chunks.get(&(x, z)) else {
-            return;
-        };
-        let body = self.encoder.body_in(chunk, world);
-        for g in self
-            .guests
-            .iter()
-            .filter(|g| g.sent_chunks.contains(&(x, z)))
-        {
-            g.sender.send(body.clone());
-        }
-    }
-
     /// `ChunkHolder.broadcastChanges`' light part: the light sections that
     /// changed in a column go to the players for whom it is on the border of
     /// what they track (`ChunkMap.isChunkOnTrackedBorder`); the others light
@@ -1492,16 +1477,7 @@ impl Hub {
         attributes: Vec<play::AttributeSnapshot>,
     ) -> EntityState {
         let (sneaking, sprinting, gliding, sleeping) = flags;
-        let mut shared = 0i8;
-        if sneaking {
-            shared |= 0x02;
-        }
-        if sprinting {
-            shared |= 0x08;
-        }
-        if gliding {
-            shared |= -128;
-        }
+        let shared = shared_flags(sneaking, sprinting, gliding);
         let pose = if sleeping {
             2
         } else if gliding {
@@ -1544,9 +1520,12 @@ impl Hub {
             velocity: [0.0; 3],
             data: 0,
             meta,
+            defaults: Vec::new(),
             equipment,
             attributes,
             precise: false,
+            needs_sync: false,
+            leash: None,
         }
     }
 
@@ -1755,6 +1734,39 @@ impl Hub {
                 }));
             }
         }
+        // ServerEntity.sendDirtyEntityData: the air supply and the absorption
+        // amount the server's body changed go to the player, whose HUD draws
+        // them (bubbles, golden hearts).
+        let g = &mut self.guests[i];
+        if let Some(m) = g.motion.as_ref() {
+            let now = (m.air, m.health.absorption());
+            let mut values = Vec::new();
+            if now.0 != g.sent_air.0 {
+                values.push((1, serializer::INT, Value::Int(now.0)));
+            }
+            if now.1.to_bits() != g.sent_air.1.to_bits() {
+                values.push((17, serializer::FLOAT, Value::Float(now.1)));
+            }
+            if !values.is_empty() {
+                g.sent_air = now;
+                g.send(&C::SetEntityData(play::SetEntityData {
+                    id: g.entity_id,
+                    values,
+                }));
+            }
+        }
+        // ServerEntity.sendDirtyEntityData: the shared flags go to the player
+        // too, so the sprint a hit stops (Player.causeExtraKnockback) stops
+        // on its client.
+        let g = &mut self.guests[i];
+        let shared = shared_flags(g.sneaking, g.sprinting, g.fall_flying);
+        if shared != g.sent_shared {
+            g.sent_shared = shared;
+            g.send(&C::SetEntityData(play::SetEntityData {
+                id: g.entity_id,
+                values: vec![(0, serializer::BYTE, Value::Byte(shared))],
+            }));
+        }
         // Sent when the health or the food level changes, or the saturation
         // reaches or leaves zero; a dead player's health of 0 too.
         let g = &mut self.guests[i];
@@ -1815,7 +1827,9 @@ impl Hub {
     fn flush_advancements(&mut self, i: usize, show: bool) {
         let sync = self.sync.clone();
         let g = &mut self.guests[i];
-        let unlocked = std::mem::take(&mut g.recipes_unlocked);
+        let mut unlocked = std::mem::take(&mut g.recipes_unlocked);
+        // A recipe given and taken before this flush must not reappear.
+        unlocked.retain(|id| g.recipe_book.knows(id));
         if let Some(add) = sync.advancements.recipes_added(&unlocked, &sync) {
             g.send(&raw(ids::RECIPE_BOOK_ADD, add));
         }
@@ -1972,10 +1986,15 @@ impl Hub {
                     self.guests[i].sneaking = p.flags & 32 != 0;
                     self.guests[i].sprinting = p.flags & 64 != 0 && p.flags & 1 != 0;
                 }
+                // OPEN_INVENTORY (the ridden mount's inventory) and
+                // START_FALL_FLYING (checked against the guest's chest slot
+                // and effects) are the game's.
+                S::PlayerCommand(p) if matches!(p.action, 5 | 6) => {
+                    events.push(HostEvent::Packet(conn, Box::new(S::PlayerCommand(p))));
+                }
                 S::PlayerCommand(p) => match p.action {
                     1 => self.guests[i].sprinting = true,
                     2 => self.guests[i].sprinting = false,
-                    6 => self.guests[i].fall_flying = true,
                     // STOP_SLEEPING.
                     0 => self.wake(i),
                     _ => {}
@@ -2461,9 +2480,12 @@ impl Hub {
                 global: false,
             }));
         }
-        // lastSentExp, lastSentHealth and lastSentFood.
+        // lastSentExp, lastSentHealth and lastSentFood; the client's new
+        // player starts with the default air and no absorption.
         g.sent_health = None;
         g.sent_xp = None;
+        g.sent_air = (300, 0.0);
+        g.sent_shared = 0;
         let (cx, cz) = g.chunk();
         g.send(&C::SetChunkCacheCenter(play::SetChunkCacheCenter {
             x: cx,
@@ -2501,6 +2523,21 @@ fn ticking_state(rate: f32, frozen: bool) -> C {
     w.f32(rate);
     w.bool(frozen);
     raw(ids::TICKING_STATE, w.data)
+}
+
+/// Entity.DATA_SHARED_FLAGS_ID of a player: crouching, sprinting, gliding.
+fn shared_flags(sneaking: bool, sprinting: bool, gliding: bool) -> i8 {
+    let mut shared = 0i8;
+    if sneaking {
+        shared |= 0x02;
+    }
+    if sprinting {
+        shared |= 0x08;
+    }
+    if gliding {
+        shared |= -128;
+    }
+    shared
 }
 
 #[cfg(test)]

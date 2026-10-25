@@ -15,8 +15,32 @@ use std::{
 /// GameType ids.
 pub const SURVIVAL: i32 = 0;
 pub const CREATIVE: i32 = 1;
-pub const ADVENTURE: i32 = 2;
 pub const SPECTATOR: i32 = 3;
+
+/// The body state a player's file keeps that lives on `PlayerMotion`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SavedBody {
+    pub fire_ticks: i32,
+    pub air: i32,
+    pub fall_distance: f64,
+}
+
+impl SavedBody {
+    /// The body state of `motion`, to save.
+    pub fn of(motion: &PlayerMotion) -> Self {
+        Self {
+            fire_ticks: motion.fire_ticks,
+            air: motion.air,
+            fall_distance: motion.fall_distance,
+        }
+    }
+    /// Put it on a new body.
+    pub fn apply(self, motion: &mut PlayerMotion) {
+        motion.fire_ticks = self.fire_ticks;
+        motion.air = self.air;
+        motion.fall_distance = self.fall_distance;
+    }
+}
 
 /// An effect as last sent in ClientboundUpdateMobEffectPacket.
 #[derive(Clone, Debug, PartialEq)]
@@ -93,6 +117,10 @@ pub struct Guest {
     /// Where the player respawns (a bed's spot; `ServerPlayer.respawnConfig`),
     /// None for the world spawn.
     pub spawn: Option<[f64; 3]>,
+    /// A respawn point outside the Overworld (a respawn anchor, or one
+    /// `spawnpoint` set there): its dimension, block, yaw and whether it is
+    /// forced, as the player's save keeps it (`respawn`).
+    pub respawn_elsewhere: Option<(String, [i32; 3], f32, bool)>,
     /// Pending ClientboundPlayerPositionPacket id; movement is ignored until
     /// the client accepts it (ServerGamePacketListenerImpl.awaitingPositionFromClient).
     pub awaiting_teleport: Option<(i32, [f64; 3])>,
@@ -129,6 +157,9 @@ pub struct Guest {
     pub tracker: Tracker,
     // Player state the gameplay code reads and writes.
     pub motion: Option<Box<PlayerMotion>>,
+    /// What the player's file says of the body (`Entity.load`: the fire
+    /// and air ticks and the fall distance), for the first body it gets.
+    pub loaded_body: Option<SavedBody>,
     /// The hurt and attack logs of the body it had before it respawned,
     /// until the new body takes them over (the control socket's `hurtlog`
     /// reads across a death).
@@ -149,6 +180,9 @@ pub struct Guest {
     /// The ender chest inventory (`PlayerEnderChestContainer`, 27 slots).
     pub ender_items: Vec<Option<ItemStack>>,
     pub health: f32,
+    /// The saved `AbsorptionAmount`, until the player's first body on the
+    /// server takes it (the body holds the live amount).
+    pub saved_absorption: Option<f32>,
     pub food: i32,
     pub saturation: f32,
     pub xp_level: i32,
@@ -168,6 +202,13 @@ pub struct Guest {
     /// `lastSentHealth`, `lastSentFood` and `lastFoodSaturationZero`.
     pub sent_health: Option<(f32, i32, bool)>,
     pub sent_xp: Option<(f32, i32, i32)>,
+    /// The air supply and absorption the player's client was last sent
+    /// (Entity.DATA_AIR_SUPPLY_ID, Player.DATA_PLAYER_ABSORPTION_ID); their
+    /// defaults until either changes.
+    pub sent_air: (i32, f32),
+    /// The shared flags (Entity.DATA_SHARED_FLAGS_ID) the player's client was
+    /// last sent about itself.
+    pub sent_shared: i8,
     /// Where the player last died (Player.lastDeathLocation), sent with the respawn.
     pub last_death: Option<[i32; 3]>,
     /// The last action sequence to acknowledge at the next tick (-1: none).
@@ -204,6 +245,8 @@ pub struct Guest {
     pub advancements_loaded: bool,
     pub advancements_visible: Vec<bool>,
     pub advancements_changed: std::collections::BTreeSet<usize>,
+    /// The server's scoreboard as this player's client has it (lan/scoreboard.rs).
+    pub scoreboard: super::scoreboard::View,
     /// Recipes unlocked since the client was last told
     /// (`ServerRecipeBook.addRecipes` sends them).
     pub recipes_unlocked: Vec<String>,
@@ -252,6 +295,7 @@ impl Guest {
             sleep_timer: 0,
             sent_bed: None,
             spawn: None,
+            respawn_elsewhere: None,
             awaiting_teleport: None,
             teleport_counter: 0,
             teleport_tick: 0,
@@ -270,6 +314,7 @@ impl Guest {
             batch_quota: 0.0,
             tracker: Tracker::default(),
             motion: None,
+            loaded_body: None,
             logs_kept: None,
             inventory: vec![None; 36],
             armor: [None, None, None, None],
@@ -280,6 +325,7 @@ impl Guest {
             craft_result: None,
             ender_items: vec![None; 27],
             health: 20.0,
+            saved_absorption: None,
             food: 20,
             saturation: 5.0,
             xp_level: 0,
@@ -292,6 +338,8 @@ impl Guest {
             menu_state: 0,
             sent_health: None,
             sent_xp: None,
+            sent_air: (300, 0.0),
+            sent_shared: 0,
             last_death: None,
             ack_up_to: std::cell::Cell::new(-1),
             sent_selected: 0,
@@ -312,6 +360,7 @@ impl Guest {
             advancements_loaded: false,
             advancements_visible: Vec::new(),
             advancements_changed: Default::default(),
+            scoreboard: Default::default(),
             recipes_unlocked: Vec::new(),
         }
     }
@@ -383,11 +432,21 @@ impl Guest {
 }
 
 /// The off hand slot is conventionally 40 in saves and 45 in the menu.
+/// `synced_id` names an entry of a synced registry (enchantments, trim
+/// materials and patterns) by its id on this connection.
 pub fn stack_to_network(
     item_id: impl Fn(&str) -> i32,
-    enchantment_id: impl Fn(&str) -> Option<i32>,
+    synced_id: impl Fn(&str, &str) -> Option<i32>,
     s: &Option<ItemStack>,
 ) -> Option<Stack> {
+    network_stack(&item_id, &synced_id, s)
+}
+fn network_stack(
+    item_id: &dyn Fn(&str) -> i32,
+    synced_id: &dyn Fn(&str, &str) -> Option<i32>,
+    s: &Option<ItemStack>,
+) -> Option<Stack> {
+    let enchantment_id = |name: &str| synced_id("minecraft:enchantment", name);
     let s = s.as_ref()?;
     let mut stack = Stack::new(item_id(&s.item), s.count as i32);
     if s.damage > 0 {
@@ -425,6 +484,25 @@ pub fn stack_to_network(
                 horizon_protocol::item::Component::Int(rgb),
             ));
         }
+        // ArmorTrim: both holders as references into the synced registries.
+        if let Some((material, pattern)) = &d.trim {
+            let id = |registry: &str, name: &str| {
+                if name.contains(':') {
+                    synced_id(registry, name)
+                } else {
+                    synced_id(registry, &format!("minecraft:{name}"))
+                }
+            };
+            if let (Some(material), Some(pattern)) = (
+                id("minecraft:trim_material", material),
+                id("minecraft:trim_pattern", pattern),
+            ) {
+                stack.added.push((
+                    horizon_protocol::item::component::TRIM,
+                    horizon_protocol::item::Component::Trim { material, pattern },
+                ));
+            }
+        }
         if let Some(id) = d.map_id {
             stack.added.push((
                 horizon_protocol::item::component::MAP_ID,
@@ -441,6 +519,18 @@ pub fn stack_to_network(
             stack.added.push((
                 horizon_protocol::item::component::MAP_POST_PROCESSING,
                 horizon_protocol::item::Component::Int(i32::from(mode)),
+            ));
+        }
+        // A loaded crossbow's ammunition.
+        if !d.charged.is_empty() {
+            let charged = d
+                .charged
+                .iter()
+                .filter_map(|c| network_stack(item_id, synced_id, &Some(c.clone())))
+                .collect();
+            stack.added.push((
+                horizon_protocol::item::component::CHARGED_PROJECTILES,
+                horizon_protocol::item::Component::Stacks(charged),
             ));
         }
         // The books a lectern shows and a guest reads.
@@ -476,4 +566,33 @@ pub fn stack_to_network(
         ));
     }
     Some(stack)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use horizon_protocol::item::{Component, component};
+
+    #[test]
+    fn trims_go_as_synced_registry_references() {
+        let mut chestplate = ItemStack::new("minecraft:diamond_chestplate", 1);
+        chestplate.data_mut().trim = Some(("minecraft:gold".into(), "coast".into()));
+        let synced_id = |registry: &str, name: &str| match (registry, name) {
+            ("minecraft:trim_material", "minecraft:gold") => Some(4),
+            ("minecraft:trim_pattern", "minecraft:coast") => Some(1),
+            _ => None,
+        };
+        let stack = stack_to_network(|_| 7, synced_id, &Some(chestplate.clone())).unwrap();
+        assert_eq!(
+            stack.component(component::TRIM),
+            Some(&Component::Trim {
+                material: 4,
+                pattern: 1
+            })
+        );
+        // A name the connection's registry lacks sends no trim.
+        chestplate.data_mut().trim = Some(("minecraft:x".into(), "coast".into()));
+        let stack = stack_to_network(|_| 7, synced_id, &Some(chestplate)).unwrap();
+        assert_eq!(stack.component(component::TRIM), None);
+    }
 }

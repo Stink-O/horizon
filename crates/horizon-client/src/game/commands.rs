@@ -42,7 +42,8 @@ pub(super) enum Target {
     Mob(u32),
     Item(u32),
     Orb(usize),
-    Arrow(usize),
+    /// By index in `creatures.projectiles`.
+    Projectile(usize),
     Stand(u32),
     Frame(u32),
     Painting(u32),
@@ -294,6 +295,18 @@ impl Game<'_> {
     }
     // ---- entities -------------------------------------------------------
 
+    /// The level `t` is in (`Entity.level`): a server's players have their
+    /// own, which need not be the one in place; everything else is in the
+    /// level in place.
+    pub(super) fn target_level(&self, t: Target) -> Dim {
+        let conn = match t {
+            Target::Player => self.lan_acting,
+            Target::Guest(conn) => Some(conn),
+            _ => None,
+        };
+        conn.and_then(|c| self.command_guest(c))
+            .map_or(self.dim, |g| Dim::from_id(&g.dimension))
+    }
     pub(super) fn target_position(&self, t: Target) -> Option<[f64; 3]> {
         match t {
             Target::Player => self
@@ -315,7 +328,7 @@ impl Game<'_> {
                 .orbs
                 .get(i)
                 .map(|o| [o.position.x, o.position.y, o.position.z]),
-            Target::Arrow(i) => self
+            Target::Projectile(i) => self
                 .creatures
                 .projectiles
                 .get(i)
@@ -370,7 +383,11 @@ impl Game<'_> {
                 }),
             Target::Item(_) => "minecraft:item".into(),
             Target::Orb(_) => "minecraft:experience_orb".into(),
-            Target::Arrow(_) => "minecraft:arrow".into(),
+            Target::Projectile(i) => self
+                .creatures
+                .projectiles
+                .get(i)
+                .map_or_else(String::new, |p| p.kind.id().into()),
             Target::Stand(_) => "minecraft:armor_stand".into(),
             Target::Frame(id) => {
                 if self.item_frames.iter().any(|f| f.id == id && f.glow) {
@@ -491,6 +508,7 @@ impl Game<'_> {
             _ => {}
         }
         if s.kind != 's' {
+            use horizon_client::projectiles::ProjectileKind as K;
             candidates.extend(self.player_candidates(s));
             candidates.extend(
                 self.mobs
@@ -505,8 +523,12 @@ impl Game<'_> {
                     .projectiles
                     .iter()
                     .enumerate()
-                    .filter(|(_, p)| p.arrow.is_some())
-                    .map(|(i, _)| Target::Arrow(i)),
+                    // The kinds /data can write (entity_nbt).
+                    .filter(|(_, p)| {
+                        p.arrow.is_some()
+                            || matches!(p.kind, K::LargeFireball { .. } | K::SmallFireball)
+                    })
+                    .map(|(i, _)| Target::Projectile(i)),
             );
             candidates.extend(self.armor_stands.iter().map(|a| Target::Stand(a.id)));
             candidates.extend(self.item_frames.iter().map(|f| Target::Frame(f.id)));
@@ -1027,6 +1049,11 @@ impl Game<'_> {
                             .play("minecraft:entity.item.pickup", Some(p), 0.2, pitch);
                     }
                 }
+                // containerMenu.broadcastChanges: InventoryChangeTrigger
+                // (and its announcement) comes before the command's message.
+                if g.player.is_some() {
+                    g.check_inventory_trigger();
+                }
             });
         }
         // The prototype stack: one item.
@@ -1065,6 +1092,8 @@ impl Game<'_> {
                 self.for_player(t, |g| g.teleport_to(Target::Player, pos, rotation));
             }
             Target::Player => {
+                // ServerPlayer.teleport: removeVehicle before placing the player.
+                self.stop_riding();
                 if let Some(p) = self.player.as_mut() {
                     p.position = v;
                     p.velocity = Vec3::new(0.0, 0.0, 0.0);
@@ -1081,9 +1110,15 @@ impl Game<'_> {
                 if let Some(m) = self.mobs.iter_mut().find(|m| m.id == id) {
                     m.position = v;
                     m.previous = v;
-                    if let Some([yaw, _]) = rotation {
+                    // Entity.teleportSetPosition: setYRot, setYHeadRot, setXRot
+                    // (clamped to -90..90), then setOldRot.
+                    if let Some([yaw, pitch]) = rotation {
                         m.yaw = yaw;
                         m.body_yaw = yaw;
+                        m.head_yaw = yaw;
+                        m.head_pitch = pitch.clamp(-90.0, 90.0);
+                        m.previous_yaw = m.yaw;
+                        m.previous_head_pitch = m.head_pitch;
                     }
                 }
             }
@@ -1099,7 +1134,7 @@ impl Game<'_> {
                     o.previous = v;
                 }
             }
-            Target::Arrow(i) => {
+            Target::Projectile(i) => {
                 if let Some(a) = self.creatures.projectiles.get_mut(i) {
                     a.position = v;
                     a.previous = v;
@@ -1191,15 +1226,12 @@ impl Game<'_> {
         pos: [f64; 3],
         rotation: Option<[f32; 2]>,
     ) -> bool {
-        let (conn, at) = match t {
-            Target::Player => (self.lan_acting, self.dim),
-            Target::Guest(conn) => (
-                Some(conn),
-                self.command_guest(conn)
-                    .map_or(self.dim, |g| super::Dim::from_id(&g.dimension)),
-            ),
-            _ => (None, self.dim),
+        let conn = match t {
+            Target::Player => self.lan_acting,
+            Target::Guest(conn) => Some(conn),
+            _ => None,
         };
+        let at = self.target_level(t);
         let Some(conn) = conn.filter(|_| at != level && self.options.dedicated.is_some()) else {
             return false;
         };
@@ -1222,12 +1254,7 @@ impl Game<'_> {
             let dest = self.entities(ctx, "destination", false)?[0];
             let pos = self.target_position(dest).unwrap_or(self.source_position());
             // Into the destination's level.
-            let level = match dest {
-                Target::Guest(conn) => self
-                    .command_guest(conn)
-                    .map_or(self.dim, |g| super::Dim::from_id(&g.dimension)),
-                _ => self.dim,
-            };
+            let level = self.target_level(dest);
             // TeleportCommand.teleportToEntity: the destination's rotation too.
             let rotation = Some(self.target_rotation(dest));
             for &t in &targets {
@@ -1531,14 +1558,10 @@ impl Game<'_> {
                     self.orbs[i].age = u32::MAX / 2;
                 }
             }
-            Target::Arrow(i) => {
-                if let Some(a) = self
-                    .creatures
-                    .projectiles
-                    .get_mut(i)
-                    .and_then(|p| p.arrow.as_mut())
-                {
-                    a.removed = true;
+            // cmd_kill goes from the highest index down.
+            Target::Projectile(i) => {
+                if i < self.creatures.projectiles.len() {
+                    self.creatures.projectiles.remove(i);
                 }
             }
             Target::Stand(id) => self.armor_stands.retain(|a| a.id != id),
@@ -1560,7 +1583,7 @@ impl Game<'_> {
         let mut ordered = targets.clone();
         ordered.sort_by_key(|t| {
             std::cmp::Reverse(match t {
-                Target::Orb(i) | Target::Arrow(i) => *i,
+                Target::Orb(i) | Target::Projectile(i) => *i,
                 _ => 0,
             })
         });
@@ -1568,9 +1591,6 @@ impl Game<'_> {
             self.kill_target(t);
         }
         self.orbs.retain(|o| o.age < u32::MAX / 2);
-        self.creatures
-            .projectiles
-            .retain(|p| !p.arrow.as_ref().is_some_and(|a| a.removed));
         let message = if targets.len() == 1 {
             Text::translate("commands.kill.success.single", &[names[0].clone()])
         } else {
@@ -1774,8 +1794,11 @@ impl Game<'_> {
             self.level_set(pos, state)
                 .map_err(|e| CommandError::new(Text::literal(e.to_string())))?;
         }
+        // LevelChunk.setBlockState creates it when the block, not the state, is still
+        // there after onPlace: a powered hopper turns itself `enabled=false`.
+        let landed = self.world.block(pos[0], pos[1], pos[2]);
         if old != new
-            && self.world.block(pos[0], pos[1], pos[2]) == state
+            && self.res.facts().get(landed).name == new
             && let Some(entity) = horizon_client::containers::BlockEntity::for_block(&new)
         {
             self.world.block_entities.insert(key, entity);
@@ -2298,12 +2321,23 @@ impl Game<'_> {
         };
         let yaw = ((rot[0] + 180.0).rem_euclid(360.0)) - 180.0;
         let pitch = rot[1].clamp(-90.0, 90.0);
-        self.spawn = Some(Vec3::new(
-            f64::from(pos[0]) + 0.5,
-            f64::from(pos[1]),
-            f64::from(pos[2]) + 0.5,
-        ));
-        self.respawn_config = None;
+        // SetSpawnCommand: a forced point in the source's level.
+        if self.dim == Dim::Overworld {
+            self.spawn = Some(Vec3::new(
+                f64::from(pos[0]) + 0.5,
+                f64::from(pos[1]),
+                f64::from(pos[2]) + 0.5,
+            ));
+            self.respawn_config = None;
+        } else {
+            self.spawn = None;
+            self.respawn_config = Some(super::respawn_anchor::RespawnConfig {
+                dim: self.dim,
+                pos,
+                yaw,
+                forced: true,
+            });
+        }
         let dim = Text::literal(self.dim.id());
         let p = pos.map(|v| Text::literal(v.to_string()));
         let mut args = vec![
@@ -2339,7 +2373,20 @@ impl Game<'_> {
             Some(Arg::Coords(c)) => c.rotation(self.source_rotation()),
             _ => [0.0, 0.0],
         };
-        self.level.spawn = Some([f64::from(pos[0]), f64::from(pos[1]), f64::from(pos[2])]);
+        // LevelData.setRespawnData: the world's spawn (level.dat `spawn`).
+        let old = self.level.world_spawn.replace(pos);
+        self.level.world_spawn_angle = rot;
+        // A player whose fallback is the world spawn (no spawnpoint of its
+        // own; a bed or an anchor that is gone falls back to it) respawns at
+        // the new one.
+        let floor = |s: Vec3| [s.x.floor() as i32, s.y.floor() as i32, s.z.floor() as i32];
+        if self.spawn.map(floor) == old {
+            self.spawn = Some(Vec3::new(
+                f64::from(pos[0]) + 0.5,
+                f64::from(pos[1]),
+                f64::from(pos[2]) + 0.5,
+            ));
+        }
         let args = [
             Text::literal(pos[0].to_string()),
             Text::literal(pos[1].to_string()),

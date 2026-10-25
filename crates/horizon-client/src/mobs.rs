@@ -736,9 +736,13 @@ pub struct Extra {
     /// The sniffer's and the ghastling's brain.
     pub animal_brain: Option<Box<animal_brain::Brain>>,
     pub axolotl: axolotl::Animation,
-    /// The mob this one rides, and the mob riding it (`getVehicle`, `getFirstPassenger`).
+    /// The mob or boat this one rides, and the mob riding it (`getVehicle`,
+    /// `getFirstPassenger`).
     pub mount: Option<u32>,
     pub rider: Option<u32>,
+    /// `Entity.boardingCooldown`: ticks after leaving a boat before a boat
+    /// can pick this mob up again.
+    pub boarding_cooldown: i32,
     /// A chicken carrying a zombie (`IsChickenJockey`).
     pub jockey: bool,
     /// A skeleton horse waiting to spring its trap, and how long it has waited.
@@ -792,6 +796,9 @@ pub struct Mob {
     pub on_ground: bool,
     pub horizontal_collision: bool,
     pub vertical_collision_below: bool,
+    /// `Entity.needsSync`: knocked back, pushed or jumped since its server
+    /// last sent it, so the next update goes out at once.
+    pub needs_sync: bool,
     pub health: f32,
     pub hurt_time: i32,
     pub invulnerable: i32,
@@ -983,6 +990,12 @@ pub enum MobEvent {
     SetBlock {
         pos: [i32; 3],
         state: horizon_world::registry::BlockStateId,
+    },
+    /// `DoorBlock.setOpen` by a mob (`InteractWithDoor`): the door opens or
+    /// closes, both halves, with its sound and game event.
+    SetDoorOpen {
+        pos: [i32; 3],
+        open: bool,
     },
     /// Destroy a block, dropping nothing (sheep eating grass becomes dirt via SetBlock).
     BreakBlock {
@@ -1361,8 +1374,10 @@ impl PendingPushes {
 }
 /// Adds the pending pushes aimed at `m` to its velocity, in push order.
 pub fn apply_mob_pushes(m: &mut Mob, pending: &mut PendingPushes) {
+    // Entity.push(x, y, z) sets needsSync.
     let mut add = |v: Vec3| {
         m.velocity = Vec3::new(m.velocity.x + v.x, m.velocity.y + v.y, m.velocity.z + v.z);
+        m.needs_sync = true;
     };
     if !pending.list.is_empty() {
         pending.list.retain(|(id, v)| {
@@ -1529,6 +1544,7 @@ impl Mob {
             on_ground: false,
             horizontal_collision: false,
             vertical_collision_below: false,
+            needs_sync: false,
             hurt_time: 0,
             invulnerable: 0,
             death_time: 0,
@@ -1596,6 +1612,8 @@ impl Mob {
                 | Species::Fox
                 | Species::Panda
         );
+        // The PathNavigation constructor: the base follow range.
+        mob.ai.nav.max_visited_nodes = (mob.kind.follow_range * 16.0).floor() as i32;
         ai::register(&mut mob);
         mob
     }
@@ -1769,6 +1787,7 @@ impl Mob {
         if power <= 0.0 {
             return;
         }
+        self.needs_sync = true;
         while xd * xd + zd * zd < f64::from(1.0e-5_f32) {
             xd = (self.random.next_double() - self.random.next_double()) * 0.01;
             zd = (self.random.next_double() - self.random.next_double()) * 0.01;
@@ -2270,7 +2289,7 @@ mod sensor_scan_tests {
     use horizon_core::geometry::Vec3;
     use serde_json::json;
 
-    fn kind() -> Arc<MobType> {
+    pub(super) fn kind() -> Arc<MobType> {
         Arc::new(MobType {
             id: "minecraft:cow".into(),
             species: Species::Cow,
@@ -2474,56 +2493,9 @@ mod sensor_scan_tests {
 }
 #[cfg(test)]
 mod push_tests {
+    use super::sensor_scan_tests::kind;
     use super::*;
     use horizon_core::geometry::Vec3;
-    use serde_json::json;
-
-    fn kind() -> Arc<MobType> {
-        Arc::new(MobType {
-            id: "minecraft:cow".into(),
-            species: Species::Cow,
-            width: 0.9,
-            height: 1.4,
-            eye_height: 1.3,
-            category: "creature".into(),
-            max_health: 10.0,
-            speed: 0.2,
-            flying_speed: 0.4,
-            attack_damage: 0.0,
-            attack_knockback: 0.0,
-            follow_range: 16.0,
-            step_height: 0.6,
-            armor: 0.0,
-            armor_toughness: 0.0,
-            knockback_resistance: 0.0,
-            jump_strength: 0.42,
-            attributes: Arc::default(),
-            gravity: 0.08,
-            safe_fall_distance: 3.0,
-            fall_damage_multiplier: 1.0,
-            water_efficiency: 0.0,
-            water_slowdown: 0.8,
-            air_speed: 0.02,
-            baby_scale: 0.5,
-            head_rot_speed: 10.0,
-            max_head_x_rot: 40.0,
-            max_head_y_rot: 75.0,
-            ambient_interval: 120,
-            flags: Flags {
-                animal: true,
-                ..Default::default()
-            },
-            model: Arc::new(Part::parse("root", &json!({}))),
-            layers: HashMap::new(),
-            texture: String::new(),
-            brain: Brain::Passive,
-            anim: Anim::Rabbit,
-            sounds: [""; 3],
-            step_sound: None,
-            food: Arc::default(),
-            tempt: Arc::default(),
-        })
-    }
 
     /// The pending pushes as one list, scanned for each mob, as before.
     fn take_old(events: &mut Vec<MobEvent>, from: usize, pending: &mut Vec<(u32, Vec3)>) {

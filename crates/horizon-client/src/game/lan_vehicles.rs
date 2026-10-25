@@ -9,7 +9,7 @@
 //! here with the rider's input (`ServerPlayer.getLastClientMoveIntent`).
 //! Sneaking gets out (`Player.rideTick`: `wantsToStopRiding`), and the client
 //! is teleported where the player lands (`ServerPlayer.dismountTo`).
-use super::{Game, Keys, boats::SEAT, lan::LanHost};
+use super::{Game, Keys, lan::LanHost, minecarts::SEAT};
 use horizon_client::collisions::SceneCollisions;
 use horizon_core::geometry::{Aabb, Vec3};
 use horizon_protocol::{
@@ -26,6 +26,7 @@ pub(super) fn input_keys(flags: u8) -> Keys {
         right: flags & 8 != 0,
         jump: flags & 16 != 0,
         shift: flags & 32 != 0,
+        sprint: flags & 64 != 0,
         ..Keys::default()
     }
 }
@@ -96,9 +97,10 @@ impl Game<'_> {
         let (keys, dead) = (input_keys(g.input), g.dead || g.health <= 0.0);
         let boat = self.boats.iter().position(|b| b.id == vehicle);
         let cart = self.carts.iter().any(|c| c.id == vehicle);
+        let mount = self.mobs.iter().any(|m| m.id == vehicle);
         // The vehicle is gone (broken, in another level) or the rider died:
         // its client drops it with the entity or the death screen.
-        if dead || (boat.is_none() && !cart) {
+        if dead || (boat.is_none() && !cart && !mount) {
             let g = &mut host.hub.guests[gi];
             (g.vehicle, g.vehicle_good) = (None, None);
             return;
@@ -118,12 +120,16 @@ impl Game<'_> {
                     game.dismount(i);
                     return None;
                 }
-                let p = game.boats[i].position;
-                return Some([p.x, p.y + SEAT, p.z]);
+                let p = game.player_boat_seat(i);
+                return Some([p.x, p.y, p.z]);
             }
             // The minecart moves with the rider's input, and lets it out when
-            // it sneaks or the cart breaks.
-            game.tick_cart_riding(keys);
+            // it sneaks or the cart breaks. An animal takes the rider's input
+            // for its own tick (`travelRidden`), or lets it off.
+            if !game.tick_cart_riding(keys) && game.tick_mount_riding(keys) {
+                game.riding?;
+                game.position_rider();
+            }
             game.riding?;
             let p = game.player.as_ref()?.position;
             Some([p.x, p.y, p.z])
@@ -155,19 +161,33 @@ impl Game<'_> {
         let at = self
             .boats
             .iter()
-            .find(|b| b.id == vehicle)
-            .map(|b| b.position)
+            .position(|b| b.id == vehicle)
+            .map(|i| (self.boats[i].position, self.player_boat_seat(i)))
             .or_else(|| {
                 self.carts
                     .iter()
                     .find(|c| c.id == vehicle)
-                    .map(|c| c.position)
+                    .map(|c| (c.position, c.position.add_vector(Vec3::new(0.0, SEAT, 0.0))))
             });
-        let g = &mut host.hub.guests[gi];
-        if let Some(p) = at {
+        if let Some((p, seat)) = at {
+            let g = &mut host.hub.guests[gi];
             g.vehicle_good = Some([p.x, p.y, p.z]);
             g.previous_position = g.position;
-            g.position = [p.x, p.y + SEAT, p.z];
+            g.position = [seat.x, seat.y, seat.z];
+            g.on_ground = false;
+            return;
+        }
+        // An animal: the rider sits where `positionRider` puts it.
+        let seat = self.as_guest(host, conn, |game| {
+            game.position_rider();
+            game.player
+                .as_ref()
+                .map(|p| [p.position.x, p.position.y, p.position.z])
+        });
+        if let Some(Some(at)) = seat {
+            let g = &mut host.hub.guests[gi];
+            g.previous_position = g.position;
+            g.position = at;
             g.on_ground = false;
         }
     }
@@ -185,7 +205,9 @@ impl Game<'_> {
             return;
         };
         let [x, y, z] = p.position;
-        if !(x.is_finite() && y.is_finite() && z.is_finite())
+        if !x.is_finite()
+            || !y.is_finite()
+            || !z.is_finite()
             || !p.yaw.is_finite()
             || !p.pitch.is_finite()
         {
@@ -267,10 +289,11 @@ impl Game<'_> {
         b.previous_yaw = b.yaw;
         b.yaw = p.yaw;
         b.on_ground = p.on_ground;
+        let seat = self.player_boat_seat(i);
         let g = &mut host.hub.guests[gi];
         g.vehicle_good = Some([target.x, target.y, target.z]);
         g.previous_position = g.position;
-        g.position = [target.x, target.y + SEAT, target.z];
+        g.position = [seat.x, seat.y, seat.z];
     }
 
     /// `handlePaddleBoat`: the paddles of the boat the player drives.

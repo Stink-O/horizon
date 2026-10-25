@@ -6,13 +6,15 @@
 //! the world's options) with [`Integrated::call`], as vanilla's client calls
 //! into its `IntegratedServer`.
 //!
-//! Opt-in again (`--server-thread` or `HORIZON_SERVER_THREAD=1`): it was the
-//! default for one day, but a server's players can't board, ride or hit
-//! boats and minecarts yet (#1222), and single player's window is one of
-//! them here.
+//! On by default. `--in-frame` (or `--no-server-thread`, or
+//! `HORIZON_SERVER_THREAD=0`) runs the world in the frame instead, the
+//! escape hatch. LAN guests and dedicated servers use the same code either
+//! way.
 use super::{
     Game, Options, PackResources, Resources, UiResources,
+    execution_role::ExecutionRole,
     lan::{LanSettings, Owner},
+    world_loading::WorldRequest,
 };
 use horizon_client::{
     Result,
@@ -26,7 +28,6 @@ use horizon_protocol::connection::Pipe;
 use horizon_protocol::{crypto::offline_uuid, text::translatable};
 use std::{
     net::TcpListener,
-    path::Path,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicI32, AtomicU16, AtomicU32, Ordering},
@@ -82,6 +83,10 @@ impl Integrated {
     /// `IntegratedServer.getPort` while `isPublished`.
     pub fn published(&self) -> Option<u16> {
         Some(self.flags.published.load(Ordering::Relaxed)).filter(|&p| p != 0)
+    }
+    /// `MinecraftServer.execute`: run `f` on the server thread between two ticks, without waiting for it.
+    pub fn execute(&self, f: impl FnOnce(&mut Game<'_>) + Send + 'static) {
+        let _ = self.tasks.send(Box::new(f));
     }
     /// `executeBlocking`: run `f` on the server thread between two ticks and
     /// wait for its answer; `None` once the server has stopped.
@@ -170,11 +175,6 @@ struct Launch {
     player: String,
 }
 
-/// Whether this world opens on a server thread: asked for.
-pub(super) fn wanted(options: &Options, _world: &Path) -> bool {
-    options.server_thread && options.dedicated.is_none()
-}
-
 impl Game<'_> {
     /// `Minecraft.hasSingleplayerServer`: a world of this window's own, run
     /// in the frame or on its server thread.
@@ -215,9 +215,10 @@ impl Game<'_> {
         };
         let mut options = self.options.clone();
         // A server without a console: no local player, no window, no control socket.
+        // Compatibility for gameplay checks outside startup/world loading.
         options.dedicated = Some(Vec::new());
         options.server_thread = false;
-        options.integrated = true;
+        options.execution_role = ExecutionRole::IntegratedServer;
         options.control = None;
         options.benchmark = None;
         options.frames = None;
@@ -287,13 +288,13 @@ impl Game<'_> {
         tasks: Receiver<Task>,
         ready: &Sender<Ready>,
     ) -> Result<()> {
-        self.open_world(
+        self.load_world(WorldRequest::new(
             &launch.folder,
             launch.name.as_deref(),
             launch.seed,
             launch.creative,
             launch.create.as_ref(),
-        )?;
+        )?)?;
         let saved = Box::new(self.level.clone());
         // Math.max(2, options.renderDistance): past vanilla's 32 when the
         // window's render distance is (Horizon's options go to 64).
@@ -466,8 +467,10 @@ impl Game<'_> {
                 host = self.lan.take().expect("a command puts the hub back");
                 self.leave_guest(&mut host, swap);
                 host.hub.sync_all_effects();
-                // A teleport into another level happens before its feedback is sent.
+                // A teleport into another level happens before its feedback is
+                // sent, and what the command earned is announced before it too.
                 self.run_level_teleports(&mut host);
+                self.announce_guest_advancements(&mut host);
                 for line in lines {
                     out.push(line.plain());
                     host.hub.send_to(
@@ -491,6 +494,65 @@ impl Game<'_> {
             }
         }
         self.lan = Some(host);
+        out
+    }
+
+    /// On single player's server thread: a client mod's commands, run as `owner_console_command` runs one (as the
+    /// world's owner, in the owner's level), silently and without feedback.
+    #[cfg(feature = "mods")]
+    pub(super) fn owner_commands_silently(&mut self, commands: &[String]) {
+        let started = Instant::now();
+        self.owner_commands_silently_inner(commands);
+        let ms = started.elapsed().as_secs_f32() * 1000.0;
+        if self.options.spikes.is_some_and(|threshold| ms > threshold) {
+            log::info!(
+                "Horizon: slow mod commands {ms:.1} ms ({} commands)",
+                commands.len()
+            );
+        }
+    }
+    #[cfg(feature = "mods")]
+    fn owner_commands_silently_inner(&mut self, commands: &[String]) {
+        let Some(owner) = self.serving.as_ref().map(|s| s.owner) else {
+            return;
+        };
+        let Some(mut host) = self.lan.take() else {
+            return;
+        };
+        if let Some(g) = host.hub.guests.iter().find(|g| g.uuid == owner && g.placed) {
+            let conn = g.conn;
+            let (back, theirs) = (self.dim, super::Dim::from_id(&g.dimension));
+            let entered = theirs == back || self.enter_level(Some(&mut host), theirs).is_ok();
+            if entered && let Some(swap) = self.enter_guest(&mut host, conn) {
+                self.lan = Some(host);
+                self.run_commands_silently(commands);
+                host = self.lan.take().expect("commands put the hub back");
+                self.leave_guest(&mut host, swap);
+                host.hub.sync_all_effects();
+                self.run_level_teleports(&mut host);
+            }
+            if theirs != back
+                && let Err(e) = self.enter_level(Some(&mut host), back)
+            {
+                log::error!("could not reopen {}: {e}", back.id());
+            }
+        }
+        self.lan = Some(host);
+    }
+
+    /// Run `f` with the owner's level in place (the server holds one per
+    /// dimension), then put back the level that was.
+    pub(super) fn in_owner_level<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
+        let owner = self.serving.as_ref().map(|s| s.owner);
+        let dim = self.lan.as_ref().and_then(|h| {
+            let g = h.hub.guests.iter().find(|g| Some(g.uuid) == owner)?;
+            Some(super::Dim::from_id(&g.dimension))
+        });
+        let back = dim.and_then(|d| self.enter_command_level(d));
+        let out = f(self);
+        if let Some(back) = back {
+            self.enter_command_level(back);
+        }
         out
     }
 

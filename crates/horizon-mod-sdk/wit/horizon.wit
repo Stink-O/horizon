@@ -14,19 +14,24 @@ interface log {
         warn,
         error,
     }
+    /// One line in the game's log as `[mod <id>] message`, at that level.
     write: func(level: level, message: string);
 }
 
 /// Capability `game-read`: the local player and the world clock.
 interface game {
     record player {
+        /// Feet position, in blocks.
         x: f64,
         y: f64,
         z: f64,
         /// Degrees, as F3 shows them.
         yaw: f32,
+        /// Degrees: -90 looks straight up, 90 straight down.
         pitch: f32,
+        /// Hit points as vanilla counts them: 20 is full health without effects.
         health: f32,
+        /// 0 to 20, as the hunger bar.
         food: u32,
         /// `minecraft:overworld`, `minecraft:the_nether`, ...
         dimension: string,
@@ -39,6 +44,7 @@ interface game {
     }
     /// None on the title screen.
     get-player: func() -> option<player>;
+    /// None on the title screen.
     get-clock: func() -> option<clock>;
 }
 
@@ -58,11 +64,14 @@ interface hud {
         bottom-right,
     }
     record line {
+        /// Plain text, up to 256 characters.
         text: string,
         /// 0xRRGGBB.
         color: u32,
     }
+    /// Replaces the mod's panel: up to 16 lines in that corner of the screen.
     set-panel: func(corner: corner, lines: list<line>);
+    /// Removes the mod's panel.
     clear: func();
 }
 
@@ -164,22 +173,25 @@ interface ui {
     /// Opens the mod's screen (or redraws it): coordinates are GUI pixels
     /// from the screen's centre, drawn in order.
     show: func(draws: list<draw>);
+    /// Closes the mod's screen, if it is open (the player's Escape closes it too).
     close: func();
     /// The cursor in GUI pixels from the centre while the screen is open.
     cursor: func() -> option<point>;
 }
 
 /// Capability `render`: a post-processing pass the mod supplies, drawn over
-/// the world (under the hand and the HUD) after the shader pack, if any.
+/// the world (under the hand and the HUD), before a shader pack's own
+/// post-processing, if any.
 interface render {
-    /// The pass: a fragment shader in the shader-pack stage format
-    /// (docs/shader-packs.md: the prelude's bindings and helpers, an
-    /// `fs_main` entry). Compiled once per distinct source; an error is
-    /// logged and the pass skipped.
+    /// The pass: a WGSL fragment shader with an `fs_main` entry, after the
+    /// mod pass prelude (docs/mods.md, "A mod's post pass": the world's
+    /// colour and depth, a `Frame` uniform and helpers). Compiled once per
+    /// distinct source; an error is logged and the pass skipped.
     set-post: func(wgsl: string);
     /// Sixteen floats the pass reads as `frame.mod_params[0..4]`, kept until
     /// changed. The pass runs only while some are set.
     set-params: func(params: list<f32>);
+    /// Stops the pass: no source and no parameters until the next `set-post` and `set-params`.
     clear-post: func();
     /// Shakes the camera: a jolt of `strength` (0 to 1, 1 the hardest) that
     /// fades out over `seconds` (at most 30). Jolts add up. The game turns
@@ -230,10 +242,13 @@ interface events {
     }
     /// Once, after loading. An error keeps the mod off and is shown.
     init: func() -> result<registration, string>;
+    /// Each game tick while in a world, with the game's tick counter.
     tick: func(tick: u64);
+    /// Each rendered frame, with the seconds since the last one.
     frame: func(seconds: f32);
     /// `/name args`: ok(some(text)) is shown as feedback, err(text) in red.
     command: func(name: string, args: string) -> result<option<string>, string>;
+    /// Each chat line the player receives, as plain text.
     chat: func(text: string);
 }
 

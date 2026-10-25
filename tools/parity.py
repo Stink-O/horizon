@@ -27,9 +27,10 @@ Harness probes build into .local/parity-target with release optimisations but
 without LTO and with 16 codegen units (`PROFILE` below), which builds in
 seconds instead of minutes. Rust does not let those settings change results:
 there is no fast-math, and overflow checks stay as in release. Probes built in
-the dev profile are optimised too, keeping their overflow checks. Probes the
-recorded harnesses need are built in one Cargo run before the harnesses start,
-so parallel harnesses don't queue on Cargo's lock.
+the dev profile are optimised too, keeping their overflow checks. The probes the
+selected harnesses built last time are built before they start, so parallel
+harnesses don't queue on Cargo's lock, with each harness's own package and
+feature flags so that its Cargo run then finds them fresh.
 """
 
 import argparse
@@ -38,6 +39,7 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -64,6 +66,7 @@ SHARED = Path(os.environ.get("PARITY_SHARED") or (LOCAL / "minecraft").resolve()
 MACHINE_JOBS = int(os.environ.get("PARITY_MACHINE_JOBS") or max(1, (os.cpu_count() or 4) // 2))
 HOST = socket.gethostname().split(".")[0]
 DEFAULT_MEMORY = 3 << 30  # assumed peak for a harness that never ran here
+FAILURE_TAILS, FAILURE_TAIL_LINES = 10, 30  # the summary prints the end of the first failures' logs
 
 
 def harness_settings(path):
@@ -210,18 +213,42 @@ def artifact_path(kind, name, profile):
     return TARGET / directory / ("examples" if kind == "example" else "") / name
 
 
+SELECTION_FLAGS = {"-p", "--package", "-F", "--features"}  # followed by a value
+SELECTION_SWITCHES = {"--workspace", "--all", "--all-features", "--no-default-features"}
+
+
 def artifacts_of(arguments):
-    """The [kind, name, profile] targets a cargo build/run command line names."""
+    """The [kind, name, profile, selection, examples] targets a cargo build/run command line names.
+
+    kind is example, bin, or examples/bins (every one, name ""). selection is the command's package and feature
+    flags, and examples whether the command builds any example (which turns on dev-dependencies): together they
+    decide how Cargo unifies features, so the probe prebuild must repeat them exactly. A `--workspace` build of
+    the same example gives its dependencies other features, and the harness's own `-p` build then compiles
+    everything again."""
     arguments = arguments[:arguments.index("--")] if "--" in arguments else arguments
     profile = "release" if "--release" in arguments else "dev"
-    if "--profile" in arguments:
-        profile = arguments[arguments.index("--profile") + 1]
+    selection = []
     found = []
-    for flag, kind in (("--example", "example"), ("--bin", "bin")):
-        for index, argument in enumerate(arguments[:-1]):
-            if argument == flag:
-                found.append([kind, arguments[index + 1], profile])
-    return found
+    index = 1
+    while index < len(arguments):
+        argument = arguments[index]
+        flag, _, value = argument.partition("=")
+        if flag in SELECTION_FLAGS | {"--profile", "--example", "--bin"} and not value and index + 1 < len(arguments):
+            value = arguments[index + 1]
+            index += 1
+        if flag == "--profile":
+            profile = value
+        elif flag in SELECTION_FLAGS:
+            selection += ["-p" if flag == "--package" else "--features" if flag == "-F" else flag, value]
+        elif flag in SELECTION_SWITCHES:
+            selection.append("--workspace" if flag == "--all" else flag)
+        elif flag in ("--example", "--bin"):
+            found.append([flag[2:], value])
+        elif flag in ("--examples", "--bins"):
+            found.append([flag[2:], ""])
+        index += 1
+    examples = any(kind in ("example", "examples") for kind, _ in found)
+    return [[kind, name, profile, selection, examples] for kind, name in found]
 
 
 RUST_PATH = re.compile(r"(?<![\w:])((?:crate|self|super)(?:::super)*|[a-z_][a-z0-9_]*)::((?:[A-Za-z_]\w*::)*[A-Za-z_]\w*)")
@@ -439,6 +466,64 @@ def narrow_rust_sources(sources, scope):
     return sorted(kept), None
 
 
+PROBE_SOURCE = re.compile(r"/examples/probe/(?:(support)/)?(\w+)\.rs$")
+# Each crate's probe example (crates/<crate>/examples/probe) and its target name. Until 2026-10-24 they were all
+# `probe`, and Cargo copies every crate's examples into one <profile>/examples/: a harness could run the binary
+# another harness had just copied there.
+PROBE_TARGETS = {"horizon-client": "client_probe", "horizon-protocol": "protocol_probe", "horizon-world": "world_probe"}
+OLD_PROBE_SOURCE = re.compile(r"crates/([\w-]+)/examples/probe[/.]")
+
+
+def probes_run(commands):
+    """The probes a harness ran through a crate's probe binary: `world_probe <name> ...`, or
+    `cargo run --example world_probe -- <name> ...`."""
+    names = set()
+    for arguments in commands:
+        program = Path(arguments[0]).name.removesuffix(".exe") if arguments else ""
+        if program in PROBE_TARGETS.values() and len(arguments) > 1:
+            names.add(arguments[1])
+        elif program == "cargo" and "--" in arguments and len(arguments) > arguments.index("--") + 1 \
+                and any(kind == "example" and name in PROBE_TARGETS.values() for kind, name, *_ in artifacts_of(arguments)):
+            names.add(arguments[arguments.index("--") + 1])
+    return names
+
+
+def recorded_artifacts(record):
+    """A harness record's artifacts, with the shared `probe` target of records from before 2026-10-24 renamed to
+    its crate's own (PROBE_TARGETS): the crate the record's `-p` selection names, else the one whose probe sources
+    the harness depended on. The prebuild would otherwise drop them as targets that no longer exist."""
+    artifacts = []
+    for artifact in record.get("artifacts", []):
+        if artifact[:2] != ["example", "probe"]:
+            artifacts.append(artifact)
+            continue
+        selection = artifact[3] if len(artifact) > 3 else []
+        crates = [value for flag, value in zip(selection, selection[1:]) if flag == "-p" and value in PROBE_TARGETS] \
+            or sorted({match.group(1) for path in record.get("dependencies", [])
+                       if (match := OLD_PROBE_SOURCE.match(path)) and match.group(1) in PROBE_TARGETS})
+        artifacts += [["example", PROBE_TARGETS[crate], *artifact[2:]] for crate in crates] or [artifact]
+    return artifacts
+
+
+def only_probes_run(paths, names):
+    """A probe binary's dep-info lists every probe in it. Keep those the harness ran, the probes they include! or
+    name (crate::<probe>) and the shared support modules they name (support::<module>), so that editing one probe
+    reruns only its own harnesses. Files in a probe's own subdirectory and dispatch.rs, which runs them, are always
+    kept; main.rs, which only lists them, is left out, so adding a probe reruns nothing."""
+    if not names:
+        return paths
+    names, used = {*names, "dispatch"}, ""
+    while True:
+        ran = [path for path in paths if (match := PROBE_SOURCE.search(path)) and not match.group(1) and match.group(2) in names]
+        used = "".join((ROOT / path).read_text(encoding="utf-8", errors="replace") for path in ran)
+        included = {*re.findall(r'include!\("(\w+)\.rs"\)', used), *re.findall(r"\bcrate::(\w+)", used)} - names
+        if not included:
+            break
+        names |= included
+    return [path for path in paths if not (match := PROBE_SOURCE.search(path))
+            or (f"support::{match.group(2)}" in used if match.group(1) else match.group(2) in names)]
+
+
 def dependencies(trace, scope=None):
     """Repository files a traced harness depended on, relative to ROOT, and the probes it built.
 
@@ -457,8 +542,9 @@ def dependencies(trace, scope=None):
         for argument in arguments[1:]:
             if isinstance(argument, str) and os.path.isfile(argument):
                 found.add(argument)
-    for kind, name, profile in artifacts:
-        found.update(dep_info(artifact_path(kind, name, profile)))
+    for kind, name, profile, *_ in artifacts:
+        if name:
+            found.update(dep_info(artifact_path(kind, name, profile)))
     kept = set()
     for path in found:
         path = Path(path) if os.path.isabs(path) else ROOT / path
@@ -469,7 +555,8 @@ def dependencies(trace, scope=None):
     for artifact in artifacts:
         if artifact not in unique:
             unique.append(artifact)
-    kept, note = narrow_rust_sources(sorted(kept), scope) if scope else (sorted(kept), None)
+    kept = only_probes_run(sorted(kept), probes_run(trace["commands"]))
+    kept, note = narrow_rust_sources(kept, scope) if scope else (kept, None)
     if note:
         print(f"note: PARITY_RUST_SCOPE not applied: {note}", flush=True)
     return kept, unique
@@ -515,15 +602,49 @@ def default_build_jobs():
     return jobs
 
 
+def target_packages():
+    """{(kind, name): package} for the workspace's examples and binaries."""
+    result = subprocess.run(["cargo", "metadata", "--no-deps", "--format-version", "1"], cwd=ROOT, capture_output=True,
+                            text=True)
+    if result.returncode:
+        return {}
+    return {(kind, target["name"]): package["name"] for package in json.loads(result.stdout)["packages"]
+            for target in package["targets"] for kind in target["kind"] if kind in ("example", "bin")}
+
+
+def prebuild_commands(artifacts, packages=None):
+    """The Cargo runs that build the recorded probes exactly as their harnesses do: one per profile, package and
+    feature selection, and whether examples are among the command's targets (see artifacts_of).
+
+    packages: target_packages(). Records of targets that no longer exist (a probe renamed or deleted since a harness
+    ran it) are left out, since one unknown target fails its whole Cargo run. A [kind, name, profile] record from
+    before selections were kept is taken as built with `-p` and its own crate, as nearly every harness does; the
+    harness's next run records the real one."""
+    groups = {}
+    for artifact in artifacts:
+        if packages and artifact[1] and tuple(artifact[:2]) not in packages:
+            continue
+        if len(artifact) == 3 and (packages or {}).get(tuple(artifact[:2])):
+            kind, name, profile = artifact
+            artifact = [kind, name, profile, ["-p", packages[(kind, name)]], kind == "example"]
+        if len(artifact) < 5:
+            continue
+        kind, name, profile, selection, examples = artifact
+        targets = groups.setdefault((profile, tuple(selection), examples), [])
+        target = [f"--{kind}", name] if name else [f"--{kind}"]
+        if target not in targets:
+            targets.append(target)
+    return [["cargo", "build", "--locked", "--profile", profile, *selection, *(part for target in targets for part in target)]
+            for (profile, selection, _), targets in sorted(groups.items())]
+
+
 def prebuild(artifacts, jobs):
-    """Build every recorded probe in one Cargo run so harnesses don't serialise on its lock."""
+    """Build the recorded probes before the harnesses start, so they don't serialise on Cargo's lock."""
     environment = run_environment()
     environment["CARGO_BUILD_JOBS"] = str(jobs)
     errors = ""
-    for profile in sorted({profile for _, _, profile in artifacts}):
-        command = ["cargo", "build", "--locked", "--workspace", "--profile", profile]
-        for kind, name, _ in (artifact for artifact in artifacts if artifact[2] == profile):
-            command += ["--examples", "--bins"] if kind == "all" else [f"--{kind}", name]
+    packages = target_packages()
+    for command in prebuild_commands(artifacts, packages):
         result = subprocess.run(command, cwd=ROOT, env=environment, capture_output=True, text=True)
         if result.returncode:
             errors += result.stderr
@@ -559,7 +680,10 @@ def clear_large_outputs(name, trace):
                 top = path.relative_to(local).parts[0]
             except (ValueError, IndexError):
                 continue
-            if top not in OWN_DIRECTORIES:
+            # Only the harness's own directory: another harness running beside it may be writing
+            # large files in a directory this one merely read (decorated_region compiles its oracle
+            # into chunk-generation-parity while chunk_generation writes its dumps there).
+            if top not in OWN_DIRECTORIES and top.startswith(name.replace("_", "-")):
                 directories.add(local / top)
     for directory in directories:
         for file in (directory.rglob("*") if directory.is_dir() else []):
@@ -689,6 +813,12 @@ class LocalExecutor:
         trace.unlink(missing_ok=True)
         log = (STATE_DIR / "logs" / f"{name}.log").open("w")
         environment = run_environment(reuse)
+        # A game the harness starts logs into HORIZON_HOME, which is a real player's folder when it is unset
+        # (lab.game_env keeps this one).
+        game_home = STATE_DIR / "game-home" / name
+        shutil.rmtree(game_home, ignore_errors=True)
+        game_home.mkdir(parents=True)
+        environment.setdefault("HORIZON_HOME", str(game_home))
         environment["PARITY_SHIM_OUTPUTS"] = str(outputs_listing(name, fresh=True))
         environment.pop("PARITY_SHARD", None)
         if shard:
@@ -1217,10 +1347,15 @@ def main():
             finished_run([])
         return 0
 
-    # Harnesses that never ran here have no recorded probes: build them all.
-    artifacts = [["all", "", "release"]] if any("artifacts" not in records.get(name, {}) for name in selected) else []
+    # The probes the selected harnesses built last time, here or (for those that never ran here) in another
+    # worktree. A harness with no record builds its own: building every probe for it would be ~275 binaries.
+    artifacts = []
     for name in selected:
-        for artifact in records.get(name, {}).get("artifacts", []):
+        record = records.get(name)
+        if not record or "artifacts" not in record:
+            template = SHARED / "dependencies" / f"{name}.json"
+            record = json.loads(template.read_text(encoding="utf-8")) if template.exists() else {}
+        for artifact in recorded_artifacts(record):
             if artifact not in artifacts:
                 artifacts.append(artifact)
     config = host_config()
@@ -1259,8 +1394,17 @@ def main():
     failed = sorted(name for name, record in results.items() if record["status"] != "pass")
     finished_run(failed)
     print(f"\n{len(results) - len(failed)} passed, {len(failed)} failed in {elapsed / 60:.1f} min.")
-    for name in failed:
-        print(f"  {name}: {STATE_DIR / 'logs' / (name + '.log')}")
+    for index, name in enumerate(failed):
+        log = STATE_DIR / 'logs' / (name + '.log')
+        print(f"  {name}: {log}")
+        # The end of a harness's output says why it failed, and CI shows only this output.
+        if index < FAILURE_TAILS:
+            try:
+                lines = log.read_text(encoding='utf-8', errors='replace').splitlines()[-FAILURE_TAIL_LINES:]
+            except OSError:
+                lines = []
+            for line in lines:
+                print(f"    {line[:300]}")
     return 1 if failed else 0
 
 

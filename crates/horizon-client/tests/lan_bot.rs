@@ -200,6 +200,7 @@ impl Server {
             tick_frozen: false,
             tick_steps: (0, 0),
             collision: None,
+            border: &horizon_client::worldborder::WorldBorder::default(),
         };
         let events = self.hub.tick(&mut ctx);
         for event in events {
@@ -430,9 +431,12 @@ fn guests_see_each_other_and_the_world_entities() {
         velocity: [0.0; 3],
         data: 0,
         meta: Vec::new(),
+        defaults: Vec::new(),
         equipment: Vec::new(),
         attributes: Vec::new(),
         precise: false,
+        needs_sync: false,
+        leash: None,
     };
     let first = thread::spawn(move || {
         let mut bot = connect(port, "Alex", false)?;

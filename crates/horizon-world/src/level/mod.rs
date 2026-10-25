@@ -19,9 +19,9 @@
 //!    `ServerLevel.tickChunk`'s random ticks: for each non-empty section,
 //!    `randomTickSpeed` (game rule, default 3) positions are drawn with
 //!    `Level.getBlockRandomPos` and randomly-ticking block and fluid states are
-//!    ticked. The caller decides which sections are randomly ticking (vanilla
-//!    counts randomly-ticking states per section); [`Behaviours::random_tick`]
-//!    ticks a single position.
+//!    ticked. The caller says which sections are randomly ticking when each is
+//!    reached (vanilla counts randomly-ticking states per section);
+//!    [`Behaviours::random_tick`] ticks a single position.
 //! 3. [`Behaviours::run_block_events`] runs queued block events (pistons),
 //!    then (after entities) [`Behaviours::tick_block_entities`] advances
 //!    moving pistons ([`Ticks::moving_pistons`]).
@@ -69,7 +69,7 @@
 //! level.time += 1;
 //! behaviours.tick_scheduled(&mut level, &mut ticks);
 //! for chunk in ticking_chunks {
-//!     behaviours.tick_chunk_random(&mut level, &mut ticks, chunk, randomly_ticking_section_min_ys(chunk));
+//!     behaviours.tick_chunk_random(&mut level, &mut ticks, chunk, |level, from| level.next_ticking_section(chunk, from));
 //! }
 //! behaviours.run_block_events(&mut level, &mut ticks);
 //! /* tick entities */
@@ -148,7 +148,6 @@ pub mod flags {
     pub const UPDATE_NEIGHBORS: i32 = 1;
     pub const UPDATE_CLIENTS: i32 = 2;
     pub const UPDATE_INVISIBLE: i32 = 4;
-    pub const UPDATE_IMMEDIATE: i32 = 8;
     pub const UPDATE_KNOWN_SHAPE: i32 = 16;
     pub const UPDATE_SUPPRESS_DROPS: i32 = 32;
     pub const UPDATE_MOVE_BY_PISTON: i32 = 64;

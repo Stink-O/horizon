@@ -167,6 +167,26 @@ fn object_style(o: &serde_json::Map<String, Value>) -> Style {
     style.underlined = flag("underlined");
     style.strikethrough = flag("strikethrough");
     style.obfuscated = flag("obfuscated");
+    style.font = o.get("font").and_then(crate::text::font_id);
+    // ClickEvent.CODEC: the actions a chat line acts on here. A component
+    // from a server never opens a file.
+    if let Some(e) = o.get("click_event").and_then(Value::as_object) {
+        let text = |k: &str| e.get(k).and_then(Value::as_str).map(str::to_owned);
+        style.click = match e.get("action").and_then(Value::as_str) {
+            Some("suggest_command") => text("command").map(crate::text::ClickEvent::SuggestCommand),
+            Some("copy_to_clipboard") => {
+                text("value").map(crate::text::ClickEvent::CopyToClipboard)
+            }
+            _ => None,
+        };
+    }
+    // HoverEvent.ShowText.
+    if let Some(e) = o.get("hover_event").and_then(Value::as_object)
+        && e.get("action").and_then(Value::as_str) == Some("show_text")
+        && let Some(value) = e.get("value")
+    {
+        style.hover = Some(Box::new(to_text(value, &mut |s| Text::literal(s))));
+    }
     style
 }
 /// `ComponentSerialization.CODEC` decoding into text. `selector` components
@@ -265,5 +285,27 @@ mod tests {
         assert_eq!(t.spans[1].style.color, named_color("red"));
         let (v, _) = parse_snbt("[\"a\",{\"text\":\"b\"}]").unwrap();
         assert_eq!(to_text(&v, &mut |_| Text::empty()).plain(), "ab");
+    }
+
+    #[test]
+    fn the_font_is_inherited_and_kept() {
+        let (v, _) =
+            parse_snbt(r#"{text:"a",font:"alt",extra:["b",{text:"c",font:"minecraft:uniform"}]}"#)
+                .unwrap();
+        let t = to_text(&v, &mut |_| Text::empty());
+        let fonts: Vec<_> = t.chars().map(|(_, s)| s.font.clone()).collect();
+        let (alt, uniform) = (
+            Some("minecraft:alt".into()),
+            Some("minecraft:uniform".into()),
+        );
+        assert_eq!(fonts, [alt.clone(), alt, uniform]);
+        // Back to JSON with the field, which a re-read keeps.
+        let again = to_text(&t.component(), &mut |_| Text::empty());
+        let kept: Vec<_> = again.chars().map(|(_, s)| s.font.clone()).collect();
+        assert_eq!(kept, fonts);
+        // Not an identifier: no font.
+        let (v, _) = parse_snbt(r#"{text:"a",font:"Bad Font"}"#).unwrap();
+        let t = to_text(&v, &mut |_| Text::empty());
+        assert_eq!(t.spans[0].style.font, None);
     }
 }

@@ -1158,6 +1158,8 @@ pub struct ParticleEngine {
     starters: Vec<Starter>,
     /// Local sounds requested by particles (dripstone drips): (event, position, volume, pitch).
     pub sounds: Vec<(&'static str, [f64; 3], f32, f32)>,
+    /// How many of each type were made, for `horizon-ctl status`.
+    made: std::collections::BTreeMap<&'static str, u64>,
     /// The item particles' sprites (`BreakingItemParticle`'s slime ball, snowball
     /// and cobweb models, resolved for the ground), one per model layer.
     pub item_sprites: HashMap<ParticleType, Vec<String>>,
@@ -1183,6 +1185,7 @@ impl ParticleEngine {
             starters: Vec::new(),
             camera: [0.0; 3],
             sounds: Vec::new(),
+            made: Default::default(),
             item_sprites: HashMap::new(),
         };
         let dir = root.join("assets/minecraft/particles");
@@ -1333,6 +1336,16 @@ impl ParticleEngine {
             ParticleType::ExplosionEmitter
         };
         self.add(&ParticleOptions::simple(ty), center, [1.0, 0.0, 0.0]);
+        self.explosion_blocks(center, radius, block_count, is_air);
+    }
+    /// `ClientExplosionTracker` with `Level.DEFAULT_EXPLOSION_BLOCK_PARTICLES`.
+    pub fn explosion_blocks(
+        &mut self,
+        center: [f64; 3],
+        radius: f32,
+        block_count: usize,
+        is_air: &dyn Fn([i32; 3]) -> bool,
+    ) {
         for _ in 0..block_count.min(512) {
             let r = &mut self.random;
             let d = Vec3::new(
@@ -1449,8 +1462,13 @@ impl ParticleEngine {
     pub fn create(&mut self, options: &ParticleOptions, p: [f64; 3], v: [f64; 3]) {
         let seed = self.seeds.next_long();
         if let Some(particle) = self.make(options, p, v, seed) {
+            *self.made.entry(options.ty.name()).or_default() += 1;
             self.pending.push(particle);
         }
+    }
+    /// How many particles of each type were made so far.
+    pub fn made(&self) -> &std::collections::BTreeMap<&'static str, u64> {
+        &self.made
     }
     /// Parity probes: seed the provider (`ParticleEngine.random`), level and
     /// `SpellParticle.RANDOM` generators.
@@ -3215,7 +3233,7 @@ impl ParticleEngine {
             } => {
                 p.base_tick(level);
                 let (fluid, source) = level.fluid_source(ParticleLevel::block_at(p.position));
-                if !p.removed && !(fluid == Fluid::Water && source) {
+                if !(p.removed || (fluid == Fluid::Water && source)) {
                     p.removed = true;
                 }
                 if !p.removed && p.position[1] >= y_end {
