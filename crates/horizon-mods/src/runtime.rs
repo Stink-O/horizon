@@ -69,8 +69,8 @@ const SHAKES_PER_CALL: usize = 16;
 /// A post pass's source, and its parameters.
 const POST_SOURCE: usize = 256 << 10;
 pub const POST_PARAMS: usize = 16;
-/// How far `world.raycast` sees: as far as the world can be loaded (32 chunks).
-pub const RAYCAST_MAX: f32 = 512.0;
+/// How far `world.raycast` sees: through the loaded chunks, then across the distant terrain (LOD Distance).
+pub const RAYCAST_MAX: f32 = 1024.0;
 
 /// What mods may read of the game, copied once per tick by the game.
 #[derive(Clone, Debug, Default)]

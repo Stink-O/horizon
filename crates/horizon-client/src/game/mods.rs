@@ -215,6 +215,34 @@ impl Game<'_> {
         }
     }
     /// What mods read this tick.
+    /// Past the resident chunks: the view walked across the distant terrain's ground heights (`lod::Lod::ground`),
+    /// a block at a time, so a mod can aim as far as Horizon draws. Columns in loaded chunks are left to `clip_ray`,
+    /// which has already missed them.
+    fn lod_ray(
+        &self,
+        eye: [f64; 3],
+        dir: [f64; 3],
+        reach: f64,
+    ) -> Option<([i32; 3], [f64; 3], horizon_world::registry::BlockStateId)> {
+        let lod = self.lod.as_ref()?;
+        let mut t = 0.0;
+        while t <= reach {
+            let p = [
+                eye[0] + dir[0] * t,
+                eye[1] + dir[1] * t,
+                eye[2] + dir[2] * t,
+            ];
+            let (x, z) = (p[0].floor() as i32, p[2].floor() as i32);
+            if !self.world.loaded(x, z)
+                && let Some((height, state)) = lod.ground(x, z)
+                && p[1] <= f64::from(height)
+            {
+                return Some(([x, height - 1, z], [p[0], f64::from(height), p[2]], state));
+            }
+            t += 1.0;
+        }
+        None
+    }
     fn mod_snapshot(&self) -> Snapshot {
         let player = self.player.as_ref().map(|p| Player {
             x: p.position.x,
@@ -234,21 +262,28 @@ impl Game<'_> {
         let view_hit = player.as_ref().and_then(|_| {
             let eye = self.eye_position()?;
             let dir = super::view_vector(self.yaw, self.pitch);
-            let hit = self.clip_ray(eye, dir, f64::from(horizon_mods::RAYCAST_MAX))?;
-            let state = self.world.block(hit.pos[0], hit.pos[1], hit.pos[2]);
+            let reach = f64::from(horizon_mods::RAYCAST_MAX);
+            let (pos, point, state) = match self.clip_ray(eye, dir, reach) {
+                Some(hit) => (
+                    hit.pos,
+                    hit.point,
+                    self.world.block(hit.pos[0], hit.pos[1], hit.pos[2]),
+                ),
+                None => self.lod_ray(eye, dir, reach)?,
+            };
             let distance = (0..3)
-                .map(|i| (hit.point[i] - eye[i]).powi(2))
+                .map(|i| (point[i] - eye[i]).powi(2))
                 .sum::<f64>()
                 .sqrt();
             Some((
                 distance as f32,
                 Hit {
-                    block_x: hit.pos[0],
-                    block_y: hit.pos[1],
-                    block_z: hit.pos[2],
-                    x: hit.point[0],
-                    y: hit.point[1],
-                    z: hit.point[2],
+                    block_x: pos[0],
+                    block_y: pos[1],
+                    block_z: pos[2],
+                    x: point[0],
+                    y: point[1],
+                    z: point[2],
                     block: self.res.facts().get(state).name.to_string(),
                 },
             ))

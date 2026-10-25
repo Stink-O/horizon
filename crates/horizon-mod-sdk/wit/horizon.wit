@@ -204,7 +204,8 @@ interface %world {
         block: string,
     }
     /// The first block along the player's view (fluids pass), up to
-    /// `distance` blocks (at most 512), as of this tick.
+    /// `distance` blocks (at most 1024; past the loaded chunks, across the
+    /// distant terrain when LOD Distance is on), as of this tick.
     raycast: func(distance: f32) -> option<hit>;
     /// Runs commands as the server would (operator level, no chat feedback),
     /// in order, right after this call returns, all in this tick.
