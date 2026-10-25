@@ -68,8 +68,8 @@ const SOUNDS_PER_CALL: usize = 64;
 /// A post pass's source, and its parameters.
 const POST_SOURCE: usize = 256 << 10;
 pub const POST_PARAMS: usize = 16;
-/// How far `world.raycast` sees.
-pub const RAYCAST_MAX: f32 = 256.0;
+/// How far `world.raycast` sees: as far as the world can be loaded (32 chunks).
+pub const RAYCAST_MAX: f32 = 512.0;
 
 /// What mods may read of the game, copied once per tick by the game.
 #[derive(Clone, Debug, Default)]

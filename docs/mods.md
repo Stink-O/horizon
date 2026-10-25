@@ -87,7 +87,7 @@ folder, loads no runtime and plays exactly like vanilla 26.3.
 | `input` | `input` | `claim-items(ids)`: right-clicks with those items are the mod's (`use-start`, `use-stop` with the ticks held; no zoom, placing or swing); `register-key(name, label, key)`: listed in Options > Controls under the mod's name, rebindable (saved in horizon-mod-keys.txt); `held()`; `poll()`: the events since the last call (at most 256 kept) |
 | `ui` | `ui` | `show(draws)`: opens the mod's screen (or redraws it) from fills, quads, sprites, items and text in GUI pixels from the centre, up to 4096; `close()`; `cursor()`. Clicks and Escape come back as `input` events; the screen does not pause |
 | `render` | `render` | `set-post(wgsl)`: a post-processing pass in the shader-pack stage format, drawn after the shader pack if one is on; `set-params(16 floats)`, read as `frame.mod_params`; `clear-post()` |
-| `world` | `world` | `raycast(distance)`: the first block along the view, up to 256 blocks; `run-commands(list)`: at operator level, silently, this tick (up to 8192 per call; single player and LAN hosts only); `play-sound(event, at, volume, pitch)` |
+| `world` | `world` | `raycast(distance)`: the first block along the view, up to 512 blocks (and the render distance); `run-commands(list)`: at operator level, silently, this tick (up to 8192 per call; single player and LAN hosts only); `play-sound(event, at, volume, pitch)` |
 
 | Hook (export) | When |
 |---|---|
