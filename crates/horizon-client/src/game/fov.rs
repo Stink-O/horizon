@@ -123,7 +123,15 @@ impl Game<'_> {
             )),
         };
         let tilt = self.settings.file.double("damageTiltStrength");
-        glam::Mat4::from_cols_array(&bob_matrix(&state, tilt, self.settings.view_bobbing).m)
+        let bob =
+            glam::Mat4::from_cols_array(&bob_matrix(&state, tilt, self.settings.view_bobbing).m);
+        // mods' camera shake (`render.shake`) turns the view on top
+        let now = (self.ticks as f64 + f64::from(partial)) / 20.0;
+        let scale = self.settings.file.double("screenEffectScale") as f32;
+        match self.camera_shake.pose(now, scale) {
+            Some(shake) => shake * bob,
+            None => bob,
+        }
     }
     /// `AbstractClientPlayer.tick` and `aiStep` (`ClientAvatarState.tick`,
     /// `updateBob`), `rideTick`'s `resetBob` and `LocalPlayer.move`'s walked

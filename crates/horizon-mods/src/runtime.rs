@@ -65,6 +65,7 @@ const UI_DRAWS: usize = 4096;
 /// Commands one call may queue (`world.run-commands`), sounds per call.
 const COMMANDS_PER_CALL: usize = 8192;
 const SOUNDS_PER_CALL: usize = 64;
+const SHAKES_PER_CALL: usize = 16;
 /// A post pass's source, and its parameters.
 const POST_SOURCE: usize = 256 << 10;
 pub const POST_PARAMS: usize = 16;
@@ -105,6 +106,8 @@ pub enum Output {
         volume: f32,
         pitch: f32,
     },
+    /// `render.shake`: a jolt of the camera, `strength` 0 to 1, fading out over `seconds`.
+    Shake { strength: f32, seconds: f32 },
 }
 
 /// A keybind a mod registered (capability `input`).
@@ -829,6 +832,20 @@ impl render::Host for State {
     fn clear_post(&mut self) {
         self.post_source = None;
         self.post_params = None;
+    }
+    fn shake(&mut self, strength: f32, seconds: f32) {
+        let shakes = self
+            .out
+            .iter()
+            .filter(|o| matches!(o, Output::Shake { .. }))
+            .count();
+        if shakes < SHAKES_PER_CALL && strength.is_finite() && seconds.is_finite() && strength > 0.0
+        {
+            self.out.push(Output::Shake {
+                strength: strength.min(1.0),
+                seconds: seconds.clamp(0.05, 30.0),
+            });
+        }
     }
 }
 impl world::Host for State {

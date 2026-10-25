@@ -373,6 +373,11 @@ impl Game<'_> {
                     self.audio.play(&event, at, volume, pitch);
                     continue;
                 }
+                Output::Shake { strength, seconds } => {
+                    let now = self.ticks as f64 / 20.0;
+                    self.camera_shake.add(now, strength, seconds);
+                    continue;
+                }
                 Output::Chat { name, text } => {
                     let mut line = Text::literal(format!("[{name}] ")).with_color(text::GRAY);
                     line.push(Text::literal(text));

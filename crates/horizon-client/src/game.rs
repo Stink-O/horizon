@@ -1218,6 +1218,8 @@ struct Game<'a> {
     fps_frames: u64,
     fps_at: Instant,
     ticks: u64,
+    /// Mods' camera shake (`render.shake`).
+    camera_shake: horizon_client::camera::CameraShake,
     health_hud: hud_layout::HealthHud,
     /// What ends the game with an error; kept as it is, so main can tell a debug crash.
     error: Option<Box<dyn std::error::Error>>,
@@ -11579,6 +11581,7 @@ impl<'a> Game<'a> {
             fps_frames: 0,
             fps_at: now,
             ticks: 0,
+            camera_shake: Default::default(),
             error: None,
             message: None,
             save,

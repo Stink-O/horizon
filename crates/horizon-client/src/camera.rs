@@ -772,6 +772,77 @@ pub fn bob_matrix(state: &BobState, damage_tilt_strength: f64, bob_view_option: 
     pose
 }
 
+/// Camera shake (Horizon's own, for mods: `render.shake`): jolts that fade
+/// out, turning the view with smooth noise. The amount is the jolts'
+/// combined strength squared ("trauma"), so small jolts stay subtle and big
+/// ones hit hard.
+#[derive(Clone, Debug, Default)]
+pub struct CameraShake {
+    /// (start, seconds, strength), in seconds of game ticks.
+    jolts: Vec<(f64, f32, f32)>,
+}
+/// The most the view turns at full strength: pitch, yaw and roll, in degrees.
+const SHAKE_DEGREES: [f32; 3] = [3.2, 3.6, 2.4];
+impl CameraShake {
+    pub fn add(&mut self, now: f64, strength: f32, seconds: f32) {
+        self.jolts
+            .retain(|&(start, secs, _)| now - start < f64::from(secs));
+        if self.jolts.len() < 64 {
+            self.jolts.push((now, seconds, strength.clamp(0.0, 1.0)));
+        }
+    }
+    /// The jolts' combined strength at `now`, 0 to 1.
+    pub fn trauma(&self, now: f64) -> f32 {
+        let sum: f32 = self
+            .jolts
+            .iter()
+            .map(|&(start, secs, strength)| {
+                let u = ((now - start) as f32 / secs).clamp(0.0, 1.0);
+                // a jolt hits at once and dies away smoothly
+                let left = strength * (1.0 - u) * (1.0 - u);
+                if now >= start { left * left } else { 0.0 }
+            })
+            .sum();
+        sum.sqrt().min(1.0)
+    }
+    /// The turn to multiply into the bob pose at `now`, scaled by the
+    /// Distortion Effects option.
+    pub fn pose(&self, now: f64, scale: f32) -> Option<glam::Mat4> {
+        let amount = self.trauma(now).powi(2) * scale.clamp(0.0, 1.0);
+        if amount <= 0.0 {
+            return None;
+        }
+        // each axis its own noise: a heavy slow sway with a faster tremor on top, slower the harder it shakes
+        let t = now as f32;
+        let slow = 1.0 - 0.35 * amount;
+        let axis = |k: f32| {
+            (shake_noise(t * 2.1 * slow + k * 17.3) * 0.55
+                + shake_noise(t * 6.3 * slow + k * 31.7) * 0.35
+                + shake_noise(t * 13.0 + k * 53.1) * 0.1)
+                * 1.6
+        };
+        let [p, y, r] = SHAKE_DEGREES;
+        Some(
+            glam::Mat4::from_rotation_x((axis(0.0) * p * amount).to_radians())
+                * glam::Mat4::from_rotation_y((axis(1.0) * y * amount).to_radians())
+                * glam::Mat4::from_rotation_z((axis(2.0) * r * amount).to_radians()),
+        )
+    }
+}
+/// Smooth 1D gradient noise, about -0.5 to 0.5.
+fn shake_noise(x: f32) -> f32 {
+    let grad = |i: f32| {
+        let h = (i * 127.1).sin() * 43_758.547;
+        (h - h.floor()) * 2.0 - 1.0
+    };
+    let i = x.floor();
+    let f = x - i;
+    let u = f * f * (3.0 - 2.0 * f);
+    let a = grad(i) * f;
+    let b = grad(i + 1.0) * (f - 1.0);
+    a + (b - a) * u
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -782,6 +853,18 @@ mod tests {
         assert_eq!(super::depth_far(12, 12), 768.0);
     }
     use super::*;
+    #[test]
+    fn camera_shake_fades_out() {
+        let mut shake = CameraShake::default();
+        assert!(shake.pose(0.0, 1.0).is_none());
+        shake.add(1.0, 1.0, 2.0);
+        assert!((shake.trauma(1.0) - 1.0).abs() < 1e-6);
+        assert!(shake.trauma(2.0) < shake.trauma(1.5));
+        assert_eq!(shake.trauma(3.0), 0.0);
+        assert!(shake.pose(1.2, 1.0).is_some());
+        assert!(shake.pose(1.2, 0.0).is_none());
+        assert!(shake.pose(3.5, 1.0).is_none());
+    }
     #[test]
     fn view_keeps_yaw_at_vertical_pitch_limits() {
         for yaw in [0.0, 45.0, 90.0, 180.0, -90.0, 360.0] {

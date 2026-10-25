@@ -181,6 +181,11 @@ interface render {
     /// changed. The pass runs only while some are set.
     set-params: func(params: list<f32>);
     clear-post: func();
+    /// Shakes the camera: a jolt of `strength` (0 to 1, 1 the hardest) that
+    /// fades out over `seconds` (at most 30). Jolts add up. The game turns
+    /// the view (not the player) with smooth noise, scaled by the player's
+    /// Distortion Effects option.
+    shake: func(strength: f32, seconds: f32);
 }
 
 /// Capability `world`: the world around the player, and changes to it.
