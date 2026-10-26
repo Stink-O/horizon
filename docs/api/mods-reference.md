@@ -12,10 +12,10 @@ The contract between Horizon and its mods: the WIT package `horizon:mods@0.1.0`,
 | `hud` | [`hud`](#hud) | draw text on your screen |
 | `storage` | [`storage`](#storage) | save its own settings to disk |
 | `registries` | data files (`assets/`, `data/`), no interface | add blocks and items to your worlds |
-| `input` | [`input`](#input) | react to its items, its keys and clicks on its screen |
+| `input` | [`input`](#input) | react to its items, its keys, and clicks and typing on its screen |
 | `ui` | [`ui`](#ui) | open a screen of its own |
 | `render` | [`render`](#render) | draw effects over the world |
-| `world` | [`world`](#world) | change the world you play in as an operator would, and play sounds |
+| `world` | [`world`](#world) | change the world you play in as an operator would, set your flying speed and play sounds |
 
 ## World `horizon-mod`
 
@@ -125,7 +125,7 @@ Capability `storage`: a per-mod folder of small key/value files, quota'd (docs/m
 
 Access: capability `input`.
 
-Capability `input`: right-clicks with items the mod claims, keybinds it registers, and clicks on its screen (capability `ui`). Events queue up between calls; the mod collects them with `poll`, usually each tick.
+Capability `input`: right-clicks with items the mod claims, keybinds it registers, and clicks and typing on its screen (capability `ui`). Events queue up between calls; the mod collects them with `poll`, usually each tick.
 
 ### record `held-item`
 
@@ -165,12 +165,22 @@ An item stack as the mod sees it.
 | `screen-click` | `click` | A click on the mod's screen. |
 | `screen-closed` |  | The player closed the mod's screen (Escape). |
 
+### variant `typed`
+
+A key pressed on the mod's screen (capability `ui`), held keys repeating. Escape is the game's: it closes the screen.
+
+| Case | Payload | |
+| --- | --- | --- |
+| `text` | `string` | The characters it typed, as a text box takes them (no control characters). |
+| `key` | `string` | A key that types nothing (Backspace, Delete, Enter, Tab, the arrows, Home, End, ...), as options.txt writes keys (`key.keyboard.backspace`, `key.keyboard.enter`). |
+
 | Function | Signature | What it does |
 | --- | --- | --- |
 | `claim-items` | `func(ids: list<string>)` | Items whose use the mod handles instead of the game, by id. Replaces the previous list. |
 | `register-key` | `func(name: string, label: string, key: string)` | A keybind, listed in Options > Controls under the mod's name, where the player can rebind it: `name` is the mod's own (it comes back in `key-down`), `label` what Controls shows, `key` the default as options.txt writes keys (`key.keyboard.r`). |
 | `held` | `func() -> option<held-item>` | The stack in the main hand, as of this tick. |
 | `poll` | `func() -> list<event>` | The events since the last call, oldest first (at most 256 are kept). |
+| `poll-typed` | `func() -> list<typed>` | What was typed on the mod's screen since the last call, oldest first (at most 256 are kept; what is left when the screen closes is dropped). A mod with a text field calls it with `poll`, each tick. |
 
 ## `ui`
 
@@ -246,6 +256,7 @@ Capability `world`: the world around the player, and changes to it. Changes need
 | `raycast` | `func(distance: f32) -> option<hit>` | The first block along the player's view (fluids pass), up to `distance` blocks (at most 1024; past the loaded chunks, across the distant terrain when LOD Distance is on), as of this tick. |
 | `run-commands` | `func(commands: list<string>)` | Runs commands as the server would (operator level, no chat feedback), in order, right after this call returns, all in this tick. |
 | `play-sound` | `func(event: string, at: option<tuple<f64, f64, f64>>, volume: f32, pitch: f32)` | A sound event (vanilla's or a resource pack's) at a point, or following the player when `at` is none. |
+| `set-flying-speed` | `func(speed: option<f32>)` | The local player's flying speed (creative flight), as vanilla's abilities hold it: 0.05 is vanilla's, sprinting doubles it, at most 50. The game keeps it until the mod changes it or stops, through respawns, game mode changes and other worlds; none (or a value that is not a number) puts vanilla's back. A spectator keeps the scroll wheel's speed. On a remote server it is ignored and logged. |
 
 ## `events`
 

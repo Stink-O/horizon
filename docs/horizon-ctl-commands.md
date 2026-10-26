@@ -89,7 +89,7 @@ Every command `horizon-ctl` takes, its MCP tool in `horizon-ctl mcp` (the launch
 | `click-at X Y [right]` | `click_at` | Click at GUI pixel X Y of the window (screen gives button rectangles) | `x` (number, required): GUI x<br>`y` (number, required): GUI y<br>`right` (boolean): right-click |
 | `drag-at [right] X Y X Y...` | `drag_at` | Press at the first GUI point, move through the others, release at the last | `points` (text, required): right, then GUI x y pairs |
 | `scroll-at X Y STEPS` | `scroll_at` | Turn the mouse wheel at GUI pixel X Y (positive scrolls up) | `x` (number, required): GUI x<br>`y` (number, required): GUI y<br>`steps` (number, required): wheel steps |
-| `type [--field name\|seed] [--replace] TEXT` | `type` | Type into the focused text field (chat box, world name, anvil, sign...) | `--field` (name, seed): create-world field to type into<br>`--replace` (boolean): clear the field first<br>`text` (text, required): text to type |
+| `type [--field name\|seed] [--replace] TEXT` | `type` | Type into the focused text field (chat box, world name, anvil, sign, a mod's screen...) | `--field` (name, seed): create-world field to type into<br>`--replace` (boolean): clear the field first<br>`text` (text, required): text to type |
 | `chat TEXT` | `chat` (network) | Send a chat line (or a /command) as if typed | `text` (text, required): message |
 | `command TEXT` | `command` (network) | Run a command (the leading / is optional) | `command` (text, required): command line |
 | `respawn` | `respawn` | Respawn from the death screen | none |

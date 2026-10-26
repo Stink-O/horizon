@@ -11410,6 +11410,9 @@ impl ApplicationHandler for Game<'_> {
                     };
                     self.extras_key(key, event.state == ElementState::Pressed, event.repeat);
                     self.mods_key(key, event.state == ElementState::Pressed, event.repeat);
+                    if event.state == ElementState::Pressed {
+                        self.mod_screen_key(key, event.text.as_deref());
+                    }
                     // key.smoothCamera toggles the cinematic camera.
                     if self.screen == Screen::Playing
                         && event.state == ElementState::Pressed

@@ -1,9 +1,11 @@
 //! A mod for the runtime's tests: `/spin` loops forever, `/panic` panics,
 //! `/grow` asks for a gigabyte, `/hello` chats, `/save` and `/load` exercise
 //! capability `storage` on a fixed key, `/save_key <key> <text>` exercises
-//! it on an arbitrary key (for the quota and key-count limits); `tick` and
-//! `frame` do nothing, to measure the cost of a call.
-use horizon_mod_sdk::{Mod, Registration, chat, storage};
+//! it on an arbitrary key (for the quota and key-count limits), `/fly
+//! <speed>|none` sets the flying speed, `/screen` opens an empty screen and
+//! `/typed` chats what was typed on it; `tick` and `frame` do nothing, to
+//! measure the cost of a call.
+use horizon_mod_sdk::{Mod, Registration, chat, input, storage, ui, world};
 
 struct Guest {
     ticks: u64,
@@ -11,11 +13,13 @@ struct Guest {
 
 impl Mod for Guest {
     fn init() -> Result<(Self, Registration), String> {
-        let hooks = ["spin", "panic", "grow", "hello", "save", "load", "save_key"]
-            .into_iter()
-            .fold(Registration::new(), Registration::command)
-            .on_tick()
-            .on_frame();
+        let hooks = [
+            "spin", "panic", "grow", "hello", "save", "load", "save_key", "fly", "screen", "typed",
+        ]
+        .into_iter()
+        .fold(Registration::new(), Registration::command)
+        .on_tick()
+        .on_frame();
         Ok((Guest { ticks: 0 }, hooks))
     }
     fn tick(&mut self, _tick: u64) {
@@ -51,6 +55,25 @@ impl Mod for Guest {
                     .ok_or("Usage: /save_key <key> <text>")?;
                 storage::set(key, text.as_bytes())?;
                 Ok(Some("saved".into()))
+            }
+            "fly" => {
+                world::set_flying_speed(args.parse().ok());
+                Ok(None)
+            }
+            "screen" => {
+                ui::show(&[]);
+                Ok(None)
+            }
+            "typed" => {
+                let typed: Vec<String> = input::poll_typed()
+                    .into_iter()
+                    .map(|t| match t {
+                        input::Typed::Text(s) => format!("text {s}"),
+                        input::Typed::Key(k) => format!("key {k}"),
+                    })
+                    .collect();
+                chat::show(&typed.join(", "));
+                Ok(None)
             }
             _ => {
                 chat::show(&format!("hello {args} after {} ticks", self.ticks));

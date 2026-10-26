@@ -607,7 +607,7 @@ impl Hub {
         }));
         g.send(&C::PlayerAbilities(play::PlayerAbilities {
             flags: g.ability_flags(),
-            flying_speed: 0.05,
+            flying_speed: g.flying_speed,
             walking_speed: 0.1,
         }));
         g.send(&C::SetHeldSlot(play::SetHeldSlot {
@@ -2244,7 +2244,7 @@ impl Hub {
         }));
         g.send(&C::PlayerAbilities(play::PlayerAbilities {
             flags: g.ability_flags(),
-            flying_speed: 0.05,
+            flying_speed: g.flying_speed,
             walking_speed: 0.1,
         }));
         self.broadcast(&C::PlayerInfoUpdate(play::PlayerInfoUpdate {
@@ -2254,6 +2254,21 @@ impl Hub {
                 game_mode: Some(mode),
                 ..Default::default()
             }],
+        }));
+    }
+
+    /// Set a guest's flying speed and tell it (`Abilities.setFlyingSpeed`, then
+    /// `onUpdateAbilities`). The abilities packets after carry it too, so a
+    /// respawn or a game mode change keeps it.
+    pub fn set_flying_speed(&mut self, conn: u32, speed: f32) {
+        let Some(g) = self.guest_mut(conn) else {
+            return;
+        };
+        g.flying_speed = speed;
+        g.send(&C::PlayerAbilities(play::PlayerAbilities {
+            flags: g.ability_flags(),
+            flying_speed: g.flying_speed,
+            walking_speed: 0.1,
         }));
     }
 
@@ -2336,7 +2351,7 @@ impl Hub {
         // ServerPlayer.restoreFrom: the game mode again (onUpdateAbilities).
         g.send(&C::PlayerAbilities(play::PlayerAbilities {
             flags: g.ability_flags(),
-            flying_speed: 0.05,
+            flying_speed: g.flying_speed,
             walking_speed: 0.1,
         }));
         // The new player faces the level's respawn direction (snapTo).
@@ -2457,7 +2472,7 @@ impl Hub {
         let g = &mut self.guests[i];
         g.send(&C::PlayerAbilities(play::PlayerAbilities {
             flags: g.ability_flags(),
-            flying_speed: 0.05,
+            flying_speed: g.flying_speed,
             walking_speed: 0.1,
         }));
         self.send_level_info(i, ctx);

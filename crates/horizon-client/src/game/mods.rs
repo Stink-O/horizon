@@ -28,7 +28,7 @@ use {
     },
     horizon_mods::{
         Click, Clock, Draw, HeldItem, Hit, InputEvent, ItemUse, Mods, Output, Player, Snapshot,
-        Status,
+        Status, Typed,
     },
     std::time::Instant,
 };
@@ -51,6 +51,12 @@ pub(super) struct ModsState {
     /// The mod claiming the item in use (`Game.using`), for its `use-stop`.
     #[cfg(feature = "mods")]
     pub(super) using: Option<String>,
+    /// The flying speed the mods wanted last tick (`world.set-flying-speed`), and the tick it was last sent to the
+    /// world.
+    #[cfg(feature = "mods")]
+    flying: Option<f32>,
+    #[cfg(feature = "mods")]
+    flying_sent: Option<u64>,
 }
 impl ModsState {
     /// The chat's command tree: vanilla's, plus the running mods' commands.
@@ -190,6 +196,8 @@ impl Game<'_> {
     pub(super) fn mods_key(&mut self, _key: KeyCode, _pressed: bool, _repeat: bool) {}
     pub(super) fn close_mod_screen(&mut self) {}
     pub(super) fn mod_screen_click(&mut self, _button: MouseButton) {}
+    pub(super) fn mod_screen_key(&mut self, _key: KeyCode, _text: Option<&str>) {}
+    pub(super) fn mod_screen_type(&mut self, _text: &str) {}
     pub(super) fn draw_mod_screen(&self, _batch: &mut HudBatch) {}
 }
 
@@ -392,14 +400,51 @@ impl Game<'_> {
     }
     /// A game tick.
     pub(super) fn tick_mods(&mut self) {
-        if !self.mods.mods.is_running() {
+        if self.mods.mods.is_running() {
+            let snapshot = self.mod_snapshot();
+            self.mods.mods.set_snapshot(snapshot);
+            let ticks = self.ticks;
+            horizon_client::spans::time("tick_mods", || self.mods.mods.tick(ticks));
+            self.show_mod_output();
+        }
+        // (also once the mod that wanted one has stopped)
+        self.sync_mod_flying_speed();
+    }
+    /// `world.set-flying-speed`: sent to the world when the player's differs from what a mod wants (the mod set a
+    /// new one, or a new world came with vanilla's), at most once a second while the world's answer is on its way;
+    /// vanilla's again once no mod wants one. A spectator keeps the scroll wheel's.
+    fn sync_mod_flying_speed(&mut self) {
+        const VANILLA: f32 = 0.05;
+        let want = self.mods.mods.flying_speed();
+        let was = std::mem::replace(&mut self.mods.flying, want);
+        if want.is_none() && was.is_none() {
             return;
         }
-        let snapshot = self.mod_snapshot();
-        self.mods.mods.set_snapshot(snapshot);
-        let ticks = self.ticks;
-        horizon_client::spans::time("tick_mods", || self.mods.mods.tick(ticks));
-        self.show_mod_output();
+        let Some(player) = self.player.as_ref() else {
+            return;
+        };
+        let speed = match want {
+            Some(_) if player.spectator => return,
+            Some(speed) => speed,
+            None => VANILLA,
+        };
+        let changed = want != was;
+        let waiting = self.mods.flying_sent.is_some_and(|t| self.ticks < t + 20);
+        if !changed && (player.flying_speed == speed || waiting) {
+            return;
+        }
+        self.mods.flying_sent = Some(self.ticks);
+        // Single player's player is its server thread's: the speed goes in its abilities there, which the window's
+        // player takes from the abilities packet, as a respawn or a game mode change later does.
+        if let Some(server) = &self.integrated {
+            server.execute(move |g| g.owner_flying_speed(speed));
+        } else if self.remote.is_some() {
+            if changed {
+                log::warn!("a mod's flying speed ignored: the world is on a remote server");
+            }
+        } else if let Some(player) = self.player.as_mut() {
+            player.flying_speed = speed;
+        }
     }
     /// Once per frame: the frame hook, and dev mods' rebuilds.
     pub(super) fn mods_frame(&mut self, elapsed: Duration) {
@@ -674,6 +719,38 @@ impl Game<'_> {
         self.mods
             .mods
             .push_event(&id, InputEvent::ScreenClick(click));
+    }
+    /// A key pressed on a mod's screen (repeats too): the characters it types, or its name when it types none
+    /// (`input.poll-typed`). Escape stays the game's: it closes the screen.
+    pub(super) fn mod_screen_key(&mut self, key: KeyCode, text: Option<&str>) {
+        if self.screen != Screen::Mod || key == KeyCode::Escape {
+            return;
+        }
+        let Some(id) = self.mods.screen.clone() else {
+            return;
+        };
+        // Backspace, Enter and Tab type control characters: those are keys.
+        let text: String = text
+            .unwrap_or("")
+            .chars()
+            .filter(|c| !c.is_control())
+            .collect();
+        let typed = if !text.is_empty() {
+            Typed::Text(text)
+        } else if let Some(name) = keybinds::key_name(key) {
+            Typed::Key(name.to_owned())
+        } else {
+            return;
+        };
+        self.mods.mods.push_typed(&id, typed);
+    }
+    /// `horizon-ctl type` on a mod's screen: the text as typed.
+    pub(super) fn mod_screen_type(&mut self, text: &str) {
+        if let Some(id) = self.mods.screen.clone()
+            && !text.is_empty()
+        {
+            self.mods.mods.push_typed(&id, Typed::Text(text.to_owned()));
+        }
     }
     pub(super) fn draw_mod_screen(&self, batch: &mut HudBatch) {
         let Some(draws) = self

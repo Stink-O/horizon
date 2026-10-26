@@ -19,7 +19,7 @@ mod bindings {
 pub use bindings::horizon::mods::{
     game::{Clock, Player},
     hud::{Corner, Line},
-    input::{Click, Event as InputEvent, HeldItem, ItemUse},
+    input::{Click, Event as InputEvent, HeldItem, ItemUse, Typed},
     ui::{Draw, Point, Rect},
     world::Hit,
 };
@@ -68,6 +68,8 @@ const POST_SOURCE: usize = 256 << 10;
 pub const POST_PARAMS: usize = 16;
 /// How far `world.raycast` sees: through the loaded chunks, then across the distant terrain (LOD Distance).
 pub const RAYCAST_MAX: f32 = 1024.0;
+/// The fastest flying speed `world.set-flying-speed` gives (vanilla's is 0.05).
+pub const FLYING_SPEED_MAX: f32 = 50.0;
 
 /// What mods may read of the game, copied once per tick by the game.
 #[derive(Clone, Debug, Default)]
@@ -180,6 +182,8 @@ struct State {
     claims: Vec<String>,
     keys: Vec<ModKey>,
     events: Vec<InputEvent>,
+    /// What was typed on its screen since the last `poll-typed`.
+    typed: Vec<Typed>,
     /// Capability `ui`: what the open screen draws (None: closed), and the
     /// cursor while it is open.
     screen: Option<Vec<Draw>>,
@@ -187,6 +191,8 @@ struct State {
     /// Capability `render`.
     post_source: Option<(Arc<str>, u64)>,
     post_params: Option<[f32; POST_PARAMS]>,
+    /// Capability `world`: the flying speed it wants the player to have.
+    flying_speed: Option<f32>,
 }
 
 /// The installed mods and the engine running them. `Mods::default()` is
@@ -324,10 +330,12 @@ impl Mods {
             claims: Vec::new(),
             keys: Vec::new(),
             events: Vec::new(),
+            typed: Vec::new(),
             screen: None,
             cursor: None,
             post_source: None,
             post_params: None,
+            flying_speed: None,
         };
         let mut store = Store::new(engine, state);
         store.limiter(|s| &mut s.limits);
@@ -538,6 +546,18 @@ impl Mods {
             events.push(event);
         }
     }
+    /// Queues what was typed on mod `id`'s open screen for its next `poll-typed`.
+    pub fn push_typed(&mut self, id: &str, typed: Typed) {
+        if let Some(run) = self.running_mut(id)
+            && run.store.data().screen.is_some()
+        {
+            let queue = &mut run.store.data_mut().typed;
+            if queue.len() >= EVENTS_KEPT {
+                queue.remove(0);
+            }
+            queue.push(typed);
+        }
+    }
     /// What mod `id`'s screen draws, while it is open.
     pub fn screen(&self, id: &str) -> Option<&[Draw]> {
         self.running(id)?.store.data().screen.as_deref()
@@ -547,6 +567,7 @@ impl Mods {
         if let Some(run) = self.running_mut(id)
             && run.store.data_mut().screen.take().is_some()
         {
+            run.store.data_mut().typed.clear();
             self.push_event(id, InputEvent::ScreenClosed);
         }
     }
@@ -566,6 +587,14 @@ impl Mods {
                 params: s.post_params?,
             })
         })
+    }
+
+    /// The flying speed the first running mod that set one wants (capability
+    /// `world`); none when no running mod wants one.
+    pub fn flying_speed(&self) -> Option<f32> {
+        self.entries
+            .iter()
+            .find_map(|e| e.run.as_ref()?.store.data().flying_speed)
     }
 
     /// Restarts the mods whose file changed since they loaded (mod
@@ -759,6 +788,9 @@ impl input::Host for State {
     fn poll(&mut self) -> Vec<InputEvent> {
         std::mem::take(&mut self.events)
     }
+    fn poll_typed(&mut self) -> Vec<Typed> {
+        std::mem::take(&mut self.typed)
+    }
 }
 impl ui::Host for State {
     fn show(&mut self, mut draws: Vec<Draw>) {
@@ -775,6 +807,7 @@ impl ui::Host for State {
     }
     fn close(&mut self) {
         if self.screen.take().is_some() {
+            self.typed.clear();
             let id = self.id.clone();
             self.out.push(Output::Screen { id, open: false });
         }
@@ -858,6 +891,11 @@ impl world::Host for State {
             let id = self.id.clone();
             self.out.push(Output::Commands { id, commands });
         }
+    }
+    fn set_flying_speed(&mut self, speed: Option<f32>) {
+        self.flying_speed = speed
+            .filter(|s| s.is_finite())
+            .map(|s| s.clamp(0.0, FLYING_SPEED_MAX));
     }
     fn play_sound(&mut self, event: String, at: Option<(f64, f64, f64)>, volume: f32, pitch: f32) {
         let sounds = self

@@ -540,6 +540,28 @@ impl Game<'_> {
         self.lan = Some(host);
     }
 
+    /// On single player's server thread: a client mod's flying speed for the world's owner (capability `world`), kept
+    /// on the server's player as vanilla keeps its abilities, so the abilities it sends later (a respawn, a game mode
+    /// change) carry it.
+    #[cfg(feature = "mods")]
+    pub(super) fn owner_flying_speed(&mut self, speed: f32) {
+        let Some(owner) = self.serving.as_ref().map(|s| s.owner) else {
+            return;
+        };
+        let Some(host) = self.lan.as_mut() else {
+            return;
+        };
+        if let Some(conn) = host
+            .hub
+            .guests
+            .iter()
+            .find(|g| g.uuid == owner && g.placed)
+            .map(|g| g.conn)
+        {
+            host.hub.set_flying_speed(conn, speed);
+        }
+    }
+
     /// Run `f` with the owner's level in place (the server holds one per
     /// dimension), then put back the level that was.
     pub(super) fn in_owner_level<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {

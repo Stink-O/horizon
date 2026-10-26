@@ -1,7 +1,8 @@
 //! Loads real mods built with the SDK: the coords-hud example and a guest
 //! that misbehaves on command. Needs `rustup target add wasm32-unknown-unknown`.
 use horizon_mods::{
-    Clock, Corner, Mods, Output, Package, Player, Snapshot, Status, manifest::componentize,
+    Clock, Corner, FLYING_SPEED_MAX, Mods, Output, Package, Player, Snapshot, Status, Typed,
+    manifest::componentize,
 };
 use std::{
     path::{Path, PathBuf},
@@ -15,7 +16,7 @@ id = "test_guest"
 name = "Test Guest"
 version = "0.1.0"
 api = "0.1"
-capabilities = ["chat", "storage"]
+capabilities = ["chat", "storage", "input", "ui", "world"]
 "#;
 
 /// Builds both mods once and writes their `.hmod` files; returns the folder.
@@ -140,6 +141,59 @@ fn undeclared_capabilities_are_refused() {
     let mods = Mods::load(&[dir], |_| true, |_| false);
     let refused = Status::Failed("uses capability chat, missing from horizon-mod.toml".into());
     assert_eq!(mods.entries()[0].status, refused);
+}
+
+#[test]
+fn flying_speed_is_kept_clamped_and_reset() {
+    let mut mods = load("horizon_mods_test_guest.hmod");
+    assert_eq!(mods.flying_speed(), None);
+    mods.command("fly 0.5");
+    assert_eq!(mods.flying_speed(), Some(0.5));
+    // Kept across calls until changed.
+    mods.tick(1);
+    assert_eq!(mods.flying_speed(), Some(0.5));
+    mods.command("fly 9999");
+    assert_eq!(mods.flying_speed(), Some(FLYING_SPEED_MAX));
+    mods.command("fly -3");
+    assert_eq!(mods.flying_speed(), Some(0.0));
+    mods.command("fly NaN");
+    assert_eq!(mods.flying_speed(), None);
+    mods.command("fly 1");
+    mods.command("fly none");
+    assert_eq!(mods.flying_speed(), None);
+    // A stopped mod wants none.
+    mods.command("fly 2");
+    mods.command("panic");
+    assert_eq!(mods.flying_speed(), None);
+}
+
+#[test]
+fn typing_reaches_only_an_open_screen() {
+    let mut mods = load("horizon_mods_test_guest.hmod");
+    let id = "test_guest";
+    let typed = |mods: &mut Mods| {
+        mods.drain();
+        mods.command("typed");
+        mods.drain().into_iter().find_map(|o| match o {
+            Output::Chat { text, .. } => Some(text),
+            _ => None,
+        })
+    };
+    // No screen: nothing is kept.
+    mods.push_typed(id, Typed::Text("lost".into()));
+    assert_eq!(typed(&mut mods).as_deref(), Some(""));
+    mods.command("screen");
+    mods.push_typed(id, Typed::Text("12".into()));
+    mods.push_typed(id, Typed::Key("key.keyboard.enter".into()));
+    assert_eq!(
+        typed(&mut mods).as_deref(),
+        Some("text 12, key key.keyboard.enter")
+    );
+    // Taken once; what is left when the screen closes is dropped.
+    assert_eq!(typed(&mut mods).as_deref(), Some(""));
+    mods.push_typed(id, Typed::Text("3".into()));
+    mods.screen_closed(id);
+    assert_eq!(typed(&mut mods).as_deref(), Some(""));
 }
 
 #[test]

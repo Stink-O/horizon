@@ -300,6 +300,10 @@ impl Game<'_> {
                 if action == "tap" {
                     self.mods_key(physical, false, false);
                 }
+                // A mod's screen hears the key by name (`type` gives it text).
+                if action != "up" {
+                    self.mod_screen_key(physical, None);
+                }
                 // Text screens consume raw presses; releases follow key binds.
                 let typing = matches!(self.screen, Screen::Chat | Screen::Options);
                 let key = if typing && arg(2)? != "up" {
@@ -596,9 +600,10 @@ impl Game<'_> {
                         // As typed: replaces a selected query, keeps the length limit.
                         self.creative_search_edit(Some(text), false)
                     }
+                    Screen::Mod => self.mod_screen_type(text),
                     _ => {
                         return Err(
-                            "type needs the chat screen (key t tap), a sign or book, the language search, the creative search, the anvil or World Options".into(),
+                            "type needs the chat screen (key t tap), a sign or book, the language search, the creative search, the anvil, World Options or a mod's screen".into(),
                         );
                     }
                 }

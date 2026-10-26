@@ -75,13 +75,14 @@ pub enum Capability {
     /// New blocks and items from the mod's `data/` (API 0.2): no WIT
     /// interface, the game reads them before the world loads.
     Registries,
-    /// Item use it claims, keybinds and clicks on its screen.
+    /// Item use it claims, keybinds, and clicks and typing on its screen.
     Input,
     /// A screen of its own.
     Ui,
     /// A post-processing pass over the world.
     Render,
-    /// Raycasts, commands at operator level and sounds in the world.
+    /// Raycasts, commands at operator level, sounds in the world and the
+    /// player's flying speed.
     World,
 }
 impl Capability {
@@ -118,11 +119,13 @@ impl Capability {
             Capability::Hud => "draw text on your screen",
             Capability::Storage => "save its own settings to disk",
             Capability::Registries => "add blocks and items to your worlds",
-            Capability::Input => "react to its items, its keys and clicks on its screen",
+            Capability::Input => {
+                "react to its items, its keys, and clicks and typing on its screen"
+            }
             Capability::Ui => "open a screen of its own",
             Capability::Render => "draw effects over the world",
             Capability::World => {
-                "change the world you play in as an operator would, and play sounds"
+                "change the world you play in as an operator would, set your flying speed and play sounds"
             }
         }
     }

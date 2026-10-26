@@ -87,7 +87,7 @@ interface storage {
 }
 
 /// Capability `input`: right-clicks with items the mod claims, keybinds it
-/// registers, and clicks on its screen (capability `ui`). Events queue up
+/// registers, and clicks and typing on its screen (capability `ui`). Events queue up
 /// between calls; the mod collects them with `poll`, usually each tick.
 interface input {
     /// An item stack as the mod sees it.
@@ -128,6 +128,17 @@ interface input {
         /// The player closed the mod's screen (Escape).
         screen-closed,
     }
+    /// A key pressed on the mod's screen (capability `ui`), held keys
+    /// repeating. Escape is the game's: it closes the screen.
+    variant typed {
+        /// The characters it typed, as a text box takes them (no control
+        /// characters).
+        text(string),
+        /// A key that types nothing (Backspace, Delete, Enter, Tab, the
+        /// arrows, Home, End, ...), as options.txt writes keys
+        /// (`key.keyboard.backspace`, `key.keyboard.enter`).
+        key(string),
+    }
     /// Items whose use the mod handles instead of the game, by id. Replaces
     /// the previous list.
     claim-items: func(ids: list<string>);
@@ -140,6 +151,10 @@ interface input {
     held: func() -> option<held-item>;
     /// The events since the last call, oldest first (at most 256 are kept).
     poll: func() -> list<event>;
+    /// What was typed on the mod's screen since the last call, oldest first
+    /// (at most 256 are kept; what is left when the screen closes is
+    /// dropped). A mod with a text field calls it with `poll`, each tick.
+    poll-typed: func() -> list<typed>;
 }
 
 /// Capability `ui`: one screen the mod owns. The mod hands the game what to
@@ -225,6 +240,13 @@ interface %world {
     /// A sound event (vanilla's or a resource pack's) at a point, or
     /// following the player when `at` is none.
     play-sound: func(event: string, at: option<tuple<f64, f64, f64>>, volume: f32, pitch: f32);
+    /// The local player's flying speed (creative flight), as vanilla's
+    /// abilities hold it: 0.05 is vanilla's, sprinting doubles it, at most
+    /// 50. The game keeps it until the mod changes it or stops, through
+    /// respawns, game mode changes and other worlds; none (or a value that
+    /// is not a number) puts vanilla's back. A spectator keeps the scroll
+    /// wheel's speed. On a remote server it is ignored and logged.
+    set-flying-speed: func(speed: option<f32>);
 }
 
 /// What the game calls. Only the hooks `init` asks for are ever called.
