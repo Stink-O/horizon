@@ -17,6 +17,7 @@ mod boat_passengers;
 mod boats;
 mod books;
 mod bossbars;
+mod block_edits;
 mod breezes;
 mod cartography;
 mod chat;

@@ -602,6 +602,57 @@ impl Streaming {
             }
         }
     }
+    /// A resident column a server sent again whole (it changed it in bulk):
+    /// its new blocks taken, the sections that did not change kept as they
+    /// were, and its light and its neighbours' worked out again here, off
+    /// the game thread, as light is for the blocks a server changes one at a
+    /// time; the sections that changed remesh (with theirs) once lit.
+    pub fn replace_remote(&mut self, world: &mut World, mut chunk: Chunk) {
+        let key = (chunk.x, chunk.z);
+        let Some(old) = world.chunks.get(&key).cloned() else {
+            return self.insert_remote(world, chunk);
+        };
+        if !self.lit.contains(&key) {
+            return self.insert_remote(world, chunk);
+        }
+        let (mut a, mut b) = (Box::new([0u32; 4096]), Box::new([0u32; 4096]));
+        let mut changed = 0u32;
+        for s in 0..SECTIONS {
+            old.sections[s].unpack(&mut a);
+            chunk.sections[s].unpack(&mut b);
+            if a == b {
+                chunk.sections[s] = old.sections[s].clone();
+            } else {
+                changed |= 1 << s;
+            }
+        }
+        chunk.lit = true;
+        world.chunks.insert(key, Arc::new(chunk));
+        world.revision = world.revision.wrapping_add(1);
+        if changed == 0 {
+            return;
+        }
+        for dz in -1..=1 {
+            for dx in -1..=1 {
+                world.dirty_light.insert((key.0 + dx, key.1 + dz));
+            }
+        }
+        for s in 0..SECTIONS as i32 {
+            if changed & 1 << s == 0 {
+                continue;
+            }
+            for sy in s - 1..=s + 1 {
+                if !(0..SECTIONS as i32).contains(&sy) {
+                    continue;
+                }
+                for dz in -1..=1 {
+                    for dx in -1..=1 {
+                        world.dirty_sections.insert((key.0 + dx, sy, key.1 + dz));
+                    }
+                }
+            }
+        }
+    }
     /// A server's light update for a resident column: the sections whose
     /// light changed and their neighbours remesh
     /// (`setSectionDirtyWithNeighbors`).

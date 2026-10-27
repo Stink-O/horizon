@@ -540,6 +540,12 @@ impl Game<'_> {
         self.lan = Some(host);
     }
 
+    /// On single player's server thread: a client mod's block edit (`world.edit-blocks`), in the owner's level.
+    #[cfg(feature = "mods")]
+    pub(super) fn owner_edit_blocks(&mut self, id: &str, edit: &horizon_mods::BlockEdit) {
+        self.in_owner_level(|g| g.edit_blocks_logged(id, edit));
+    }
+
     /// On single player's server thread: a client mod's flying speed for the world's owner (capability `world`), kept
     /// on the server's player as vanilla keeps its abilities, so the abilities it sends later (a respawn, a game mode
     /// change) carry it.

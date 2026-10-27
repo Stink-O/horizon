@@ -1066,6 +1066,7 @@ impl Hub {
             {
                 let _ = ctx.world.block_log.take();
                 let _ = ctx.world.light_log.take();
+                ctx.world.bulk_log.clear();
             }
             return events;
         }
@@ -1382,9 +1383,42 @@ impl Hub {
     }
 
     fn broadcast_block_changes(&mut self, world: &mut World) {
+        // Chunks changed in bulk (a mod's block edit) go whole to those who see them: one packet each, where a
+        // change of each block would be thousands (the client lights and meshes them once, on its workers).
+        let bulk: Vec<(i32, i32)> = if world.bulk_log.is_empty() {
+            Vec::new()
+        } else {
+            let mut keys: Vec<_> = world.bulk_log.drain().collect();
+            keys.sort_unstable();
+            keys
+        };
+        if !bulk.is_empty() {
+            let columns: Vec<&Chunk> = bulk
+                .iter()
+                .filter_map(|k| world.chunks.get(k).map(|c| &**c))
+                .collect();
+            self.encoder.warm(&columns);
+            for chunk in columns {
+                let key = (chunk.x, chunk.z);
+                let viewers: Vec<usize> = (0..self.guests.len())
+                    .filter(|&i| self.here(&self.guests[i]) && self.guests[i].sent_chunks.contains(&key))
+                    .collect();
+                if viewers.is_empty() {
+                    continue;
+                }
+                let body = self.encoder.body_in(chunk, world);
+                for &i in &viewers {
+                    self.guests[i].sender.send(body.clone());
+                }
+            }
+        }
         let Some(log) = world.block_log.as_mut() else {
             return;
         };
+        if !bulk.is_empty() {
+            // (what changed in them one at a time went with them)
+            log.retain(|p| bulk.binary_search(&(p.0 >> 4, p.2 >> 4)).is_err());
+        }
         if log.is_empty() {
             return;
         }

@@ -14,6 +14,7 @@ mod bindings {
     wasmtime::component::bindgen!({
         path: "../horizon-mod-sdk/wit",
         world: "horizon-mod",
+        additional_derives: [PartialEq],
     });
 }
 pub use bindings::horizon::mods::{
@@ -21,7 +22,7 @@ pub use bindings::horizon::mods::{
     hud::{Corner, Line},
     input::{Click, Event as InputEvent, HeldItem, ItemUse, Typed},
     ui::{Draw, Point, Rect},
-    world::Hit,
+    world::{BlockEdit, BlockRun, Heightmap, Hit},
 };
 use bindings::{
     HorizonMod,
@@ -63,6 +64,9 @@ const UI_DRAWS: usize = 4096;
 const COMMANDS_PER_CALL: usize = 8192;
 const SOUNDS_PER_CALL: usize = 64;
 const SHAKES_PER_CALL: usize = 16;
+/// `world.edit-blocks`: runs, and palette entries and filters, one call may make.
+pub const EDIT_RUNS: usize = 1 << 20;
+pub const EDIT_PALETTE: usize = 4096;
 /// A post pass's source, and its parameters.
 const POST_SOURCE: usize = 256 << 10;
 pub const POST_PARAMS: usize = 16;
@@ -96,6 +100,8 @@ pub enum Output {
     Screen { id: String, open: bool },
     /// `world.run-commands`: to run at operator level, silently, in order.
     Commands { id: String, commands: Vec<String> },
+    /// `world.edit-blocks`: block changes to make at once, in order with the commands.
+    Edit { id: String, edit: BlockEdit },
     /// `input.register-key`: the game lists the mods' keybinds again.
     Keys,
     /// `world.play-sound`.
@@ -890,6 +896,38 @@ impl world::Host for State {
         if !commands.is_empty() {
             let id = self.id.clone();
             self.out.push(Output::Commands { id, commands });
+        }
+    }
+    fn edit_blocks(&mut self, edit: BlockEdit) {
+        if edit.runs.len() > EDIT_RUNS
+            || edit.palette.len() > EDIT_PALETTE
+            || edit.filters.len() > EDIT_PALETTE
+        {
+            log::warn!(
+                "[mod {}] edit-blocks over {EDIT_RUNS} runs or {EDIT_PALETTE} palette entries or filters; left out",
+                self.id
+            );
+            return;
+        }
+        let palette = edit.palette.len();
+        let filters = edit.filters.len();
+        if let Some(bad) = edit.runs.iter().find(|r| {
+            r.block as usize >= palette || r.only.is_some_and(|f| f as usize >= filters)
+        }) {
+            log::warn!(
+                "[mod {}] edit-blocks: a run at {} {} {} names palette entry {} or filter {:?}, past the end; left out",
+                self.id,
+                bad.x,
+                bad.y,
+                bad.z,
+                bad.block,
+                bad.only
+            );
+            return;
+        }
+        if !edit.runs.is_empty() {
+            let id = self.id.clone();
+            self.out.push(Output::Edit { id, edit });
         }
     }
     fn set_flying_speed(&mut self, speed: Option<f32>) {

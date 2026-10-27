@@ -247,6 +247,60 @@ interface %world {
     /// is not a number) puts vanilla's back. A spectator keeps the scroll
     /// wheel's speed. On a remote server it is ignored and logged.
     set-flying-speed: func(speed: option<f32>);
+    /// Which of a column's heights a run's `y` counts from (vanilla's
+    /// heightmaps): one above the highest block that is not air, that blocks
+    /// motion or holds a fluid, that does so and is not leaves, or that is
+    /// solid.
+    enum heightmap {
+        world-surface,
+        motion-blocking,
+        motion-blocking-no-leaves,
+        ocean-floor,
+    }
+    /// A run of blocks up one column: `height` blocks from `y` up, set to
+    /// palette entry `block`.
+    record block-run {
+        x: s32,
+        z: s32,
+        /// The lowest block it changes: a height in the world, or with
+        /// `surface` the blocks over (under, when negative) the column's
+        /// height on that heightmap.
+        y: s32,
+        height: u32,
+        surface: option<heightmap>,
+        /// An index into the edit's `palette`.
+        block: u32,
+        /// An index into the edit's `filters`: only the blocks that match
+        /// it change. None changes every block of the run.
+        only: option<u32>,
+    }
+    /// Block changes made at once, straight into the world's chunk sections
+    /// (see `edit-blocks`).
+    record block-edit {
+        /// The block states the runs set, as commands write them:
+        /// `minecraft:stone`, `minecraft:oak_log[axis=x]`.
+        palette: list<string>,
+        /// What a run may require of the block it replaces, as `fill ...
+        /// replace` takes it: `minecraft:air`, `#minecraft:logs`.
+        filters: list<string>,
+        /// Made in order, each seeing the changes of those before it.
+        runs: list<block-run>,
+    }
+    /// Sets many blocks at once, far faster than `fill` and `setblock`: a
+    /// run per span of a column, each block its own palette entry if need
+    /// be. Made on the world's thread right after this call returns, in
+    /// order with `run-commands`, as `fill ... strict` makes them: nothing
+    /// round them is told (no neighbour or shape updates, no drops, sand and
+    /// gravel stay up, water and lava keep still), and a block entity goes
+    /// with its block. Light is worked out again once for each chunk
+    /// changed, off the world's thread, each chunk is remeshed once, and the
+    /// players who see a chunk are sent it whole. Heights (`surface`) are read
+    /// before any of the edit's changes. Only loaded chunks change, within
+    /// the world's height; the rest of a run is left out. At most 1,048,576
+    /// runs and 4,096 palette entries and filters a call. A block or filter
+    /// that does not parse, or an index past the end, leaves the whole edit
+    /// out (logged). On a remote server it is ignored and logged.
+    edit-blocks: func(edit: block-edit);
 }
 
 /// What the game calls. Only the hooks `init` asks for are ever called.

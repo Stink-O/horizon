@@ -1741,7 +1741,12 @@ impl Game<'_> {
             C::LevelChunkWithLight(p) => match self.remote_chunk(&p) {
                 Ok(chunk) => {
                     let (x, z) = (p.x, p.z);
-                    self.streaming.insert_remote(&mut self.world, chunk);
+                    // A column sent again while it is resident (a bulk edit): only what changed is lit and meshed again.
+                    if self.world.chunks.contains_key(&(x, z)) {
+                        self.streaming.replace_remote(&mut self.world, chunk);
+                    } else {
+                        self.streaming.insert_remote(&mut self.world, chunk);
+                    }
                     self.world
                         .block_entities
                         .retain(|k, _| (k.0 >> 4, k.2 >> 4) != (x, z));

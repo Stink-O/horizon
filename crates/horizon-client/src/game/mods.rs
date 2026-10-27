@@ -525,6 +525,10 @@ impl Game<'_> {
                     self.run_mod_commands(&id, commands);
                     continue;
                 }
+                Output::Edit { id, edit } => {
+                    self.run_mod_edit(&id, edit);
+                    continue;
+                }
                 Output::Sound {
                     event,
                     at,
@@ -825,6 +829,35 @@ impl Game<'_> {
             return;
         }
         self.run_commands_silently(&commands);
+    }
+    /// `world.edit-blocks`: made where the commands run, in order with them.
+    fn run_mod_edit(&mut self, id: &str, edit: horizon_mods::BlockEdit) {
+        if let Some(server) = &self.integrated {
+            let id = id.to_owned();
+            server.execute(move |g| g.owner_edit_blocks(&id, &edit));
+            return;
+        }
+        if self.remote.is_some() {
+            log::warn!("[mod {id}] edit-blocks ignored: the world is on a remote server");
+            return;
+        }
+        self.edit_blocks_logged(id, &edit);
+    }
+    /// An edit, its time logged with `HORIZON_SPIKES` as the commands' is, its errors as the mod's.
+    pub(super) fn edit_blocks_logged(&mut self, id: &str, edit: &horizon_mods::BlockEdit) {
+        let started = std::time::Instant::now();
+        match horizon_client::spans::time("mod_edit_blocks", || self.edit_blocks(edit)) {
+            Ok(changed) => {
+                let ms = started.elapsed().as_secs_f32() * 1000.0;
+                if self.options.spikes.is_some_and(|threshold| ms > threshold) {
+                    log::info!(
+                        "Horizon: slow mod block edit {ms:.1} ms ({} runs, {changed} blocks)",
+                        edit.runs.len()
+                    );
+                }
+            }
+            Err(e) => log::warn!("[mod {id}] edit-blocks left out: {e}"),
+        }
     }
     pub(super) fn run_commands_silently(&mut self, commands: &[String]) {
         // Its own command budget: a mod's batch is not the tick's functions.

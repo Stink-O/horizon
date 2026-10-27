@@ -87,6 +87,9 @@ pub struct World {
     /// Every block position written since the log was last drained, kept
     /// only while the world is open to the network (see `lan`).
     pub block_log: Option<Vec<(i32, i32, i32)>>,
+    /// The chunks changed in bulk (`edit_runs`) since the log was last
+    /// drained, kept while `block_log` is: sent to the players whole.
+    pub bulk_log: crate::fast_hash::FxHashSet<(i32, i32)>,
     /// The sections whose light changed since the log was last drained, as
     /// a bit per section of each column, kept while `block_log` is
     /// (`ChunkHolder.sectionLightChanged`).
@@ -180,6 +183,7 @@ impl World {
             day_time: 1000,
             weather: Weather::default(),
             block_log: None,
+            bulk_log: Default::default(),
             light_log: None,
             moving_pistons: Vec::new(),
             pois: Default::default(),
