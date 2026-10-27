@@ -251,12 +251,48 @@ Capability `world`: the world around the player, and changes to it. Changes need
 | `z` | `f64` |  |
 | `block` | `string` | `minecraft:stone`, ... |
 
+### enum `heightmap`
+
+Which of a column's heights a run's `y` counts from (vanilla's heightmaps): one above the highest block that is not air, that blocks motion or holds a fluid, that does so and is not leaves, or that is solid.
+
+| Case | |
+| --- | --- |
+| `world-surface` |  |
+| `motion-blocking` |  |
+| `motion-blocking-no-leaves` |  |
+| `ocean-floor` |  |
+
+### record `block-run`
+
+A run of blocks up one column: `height` blocks from `y` up, set to palette entry `block`.
+
+| Field | Type | |
+| --- | --- | --- |
+| `x` | `s32` |  |
+| `z` | `s32` |  |
+| `y` | `s32` | The lowest block it changes: a height in the world, or with `surface` the blocks over (under, when negative) the column's height on that heightmap. |
+| `height` | `u32` |  |
+| `surface` | `option<heightmap>` |  |
+| `block` | `u32` | An index into the edit's `palette`. |
+| `only` | `option<u32>` | An index into the edit's `filters`: only the blocks that match it change. None changes every block of the run. |
+
+### record `block-edit`
+
+Block changes made at once, straight into the world's chunk sections (see `edit-blocks`).
+
+| Field | Type | |
+| --- | --- | --- |
+| `palette` | `list<string>` | The block states the runs set, as commands write them: `minecraft:stone`, `minecraft:oak_log[axis=x]`. |
+| `filters` | `list<string>` | What a run may require of the block it replaces, as `fill ... replace` takes it: `minecraft:air`, `#minecraft:logs`. |
+| `runs` | `list<block-run>` | Made in order, each seeing the changes of those before it. |
+
 | Function | Signature | What it does |
 | --- | --- | --- |
 | `raycast` | `func(distance: f32) -> option<hit>` | The first block along the player's view (fluids pass), up to `distance` blocks (at most 1024; past the loaded chunks, across the distant terrain when LOD Distance is on), as of this tick. |
 | `run-commands` | `func(commands: list<string>)` | Runs commands as the server would (operator level, no chat feedback), in order, right after this call returns, all in this tick. |
 | `play-sound` | `func(event: string, at: option<tuple<f64, f64, f64>>, volume: f32, pitch: f32)` | A sound event (vanilla's or a resource pack's) at a point, or following the player when `at` is none. |
 | `set-flying-speed` | `func(speed: option<f32>)` | The local player's flying speed (creative flight), as vanilla's abilities hold it: 0.05 is vanilla's, sprinting doubles it, at most 50. The game keeps it until the mod changes it or stops, through respawns, game mode changes and other worlds; none (or a value that is not a number) puts vanilla's back. A spectator keeps the scroll wheel's speed. On a remote server it is ignored and logged. |
+| `edit-blocks` | `func(edit: block-edit)` | Sets many blocks at once, far faster than `fill` and `setblock`: a run per span of a column, each block its own palette entry if need be. Made on the world's thread right after this call returns, in order with `run-commands`, as `fill ... strict` makes them: nothing round them is told (no neighbour or shape updates, no drops, sand and gravel stay up, water and lava keep still), and a block entity goes with its block. Light is worked out again once for each chunk changed, off the world's thread, each chunk is remeshed once, and the players who see a chunk are sent it whole. Heights (`surface`) are read before any of the edit's changes. Only loaded chunks change, within the world's height; the rest of a run is left out. At most 1,048,576 runs and 4,096 palette entries and filters a call. A block or filter that does not parse, or an index past the end, leaves the whole edit out (logged). On a remote server it is ignored and logged. |
 
 ## `events`
 
