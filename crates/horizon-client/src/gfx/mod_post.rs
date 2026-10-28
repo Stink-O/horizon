@@ -3,7 +3,8 @@
 //! shader pack's post-processing or the copy onto the screen then takes in place of the world's.
 //!
 //! The source is compiled when its version changes; one that does not validate is logged and skipped until the
-//! mod gives a new one.
+//! mod gives a new one. The mod's data (`render.set-data`) is a read-only storage buffer, `mod_data`: one word, 0,
+//! until it gives some, uploaded again only when its version changes.
 use bytemuck::{Pod, Zeroable};
 
 /// What a mod's pass is given before its own source.
@@ -39,6 +40,9 @@ pub struct ModPost {
     linear: wgpu::Sampler,
     nearest: wgpu::Sampler,
     uniform: wgpu::Buffer,
+    /// `mod_data`, and the version of the mod's data in it (0: none, the one word 0).
+    data: wgpu::Buffer,
+    data_version: u64,
     /// The source's version, and its pipeline (`None`: it did not compile).
     built: Option<(u64, Option<wgpu::RenderPipeline>)>,
     output: Option<Output>,
@@ -89,6 +93,14 @@ impl ModPost {
                         min_binding_size: None,
                     },
                 ),
+                fragment(
+                    5,
+                    wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
             ],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -119,11 +131,37 @@ impl ModPost {
             linear: sampler("Horizon mod post linear", wgpu::FilterMode::Linear),
             nearest: sampler("Horizon mod post nearest", wgpu::FilterMode::Nearest),
             uniform,
+            data: data_buffer(device, &[0]),
+            data_version: 0,
             built: None,
             output: None,
             started: std::time::Instant::now(),
             frames: 0,
         }
+    }
+
+    /// The mod's data for `mod_data` (none: the one word 0), uploaded when its version is new: written into the
+    /// buffer when it is the same size, else in a new buffer of its size (the bind group is made each frame).
+    pub fn set_data(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        data: Option<(&[u32], u64)>,
+    ) {
+        let (words, version) = match data {
+            Some((words, version)) if !words.is_empty() => (words, version),
+            _ => (&[0u32][..], 0),
+        };
+        if version == self.data_version {
+            return;
+        }
+        let bytes: &[u8] = bytemuck::cast_slice(words);
+        if self.data.size() == bytes.len() as u64 {
+            queue.write_buffer(&self.data, 0, bytes);
+        } else {
+            self.data = data_buffer(device, words);
+        }
+        self.data_version = version;
     }
 
     /// Compile `source` (without the prelude) if `version` is new. True when the pass can run.
@@ -238,6 +276,10 @@ impl ModPost {
                     binding: 4,
                     resource: self.uniform.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: self.data.as_entire_binding(),
+                },
             ],
         });
         if let Some((_, Some(pipeline))) = &self.built {
@@ -262,6 +304,16 @@ impl ModPost {
     }
 }
 
+/// A storage buffer holding `words` (at least one).
+fn data_buffer(device: &wgpu::Device, words: &[u32]) -> wgpu::Buffer {
+    use wgpu::util::DeviceExt;
+    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("Horizon mod post data"),
+        contents: bytemuck::cast_slice(words),
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+    })
+}
+
 /// Parse and validate a whole pass (prelude included) before wgpu sees it, so a broken one is an error, not a
 /// device fault.
 fn validate(source: &str) -> Result<(), String> {
@@ -280,4 +332,23 @@ fn validate(source: &str) -> Result<(), String> {
         return Err("no `@fragment fn fs_main`".into());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_pass_reads_its_data() {
+        // the prelude declares mod_data; a pass may read it (guarded by its length), or leave it alone
+        let reads = "@fragment fn fs_main(in: StageIn) -> @location(0) vec4<f32> {\n    \
+            let n = arrayLength(&mod_data);\n    \
+            let v = select(0.0, bitcast<f32>(mod_data[0]), n > 0u);\n    \
+            return vec4<f32>(v, frame.mod_params[0].x, 0.0, 1.0);\n}\n";
+        validate(&format!("{PRELUDE}\n{reads}")).unwrap();
+        let ignores = "@fragment fn fs_main(in: StageIn) -> @location(0) vec4<f32> {\n    \
+            return textureSampleLevel(scene_color, linear_sampler, in.uv, 0.0);\n}\n";
+        validate(&format!("{PRELUDE}\n{ignores}")).unwrap();
+        assert!(PRELUDE.contains("@group(0) @binding(5) var<storage, read> mod_data: array<u32>;"));
+    }
 }

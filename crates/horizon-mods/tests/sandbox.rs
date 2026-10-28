@@ -1,8 +1,8 @@
 //! Loads real mods built with the SDK: the coords-hud example and a guest
 //! that misbehaves on command. Needs `rustup target add wasm32-unknown-unknown`.
 use horizon_mods::{
-    Clock, Corner, FLYING_SPEED_MAX, Mods, Output, Package, Player, Snapshot, Status, Typed,
-    manifest::componentize,
+    Clock, Corner, FLYING_SPEED_MAX, Heightmap, Mods, Output, POST_DATA_WORDS, Package, Player,
+    Snapshot, Status, SurfaceHeights, Typed, manifest::componentize,
 };
 use std::{
     path::{Path, PathBuf},
@@ -16,7 +16,7 @@ id = "test_guest"
 name = "Test Guest"
 version = "0.1.0"
 api = "0.1"
-capabilities = ["chat", "storage", "input", "ui", "world"]
+capabilities = ["chat", "storage", "input", "ui", "render", "world"]
 "#;
 
 /// Builds both mods once and writes their `.hmod` files; returns the folder.
@@ -194,6 +194,81 @@ fn typing_reaches_only_an_open_screen() {
     mods.push_typed(id, Typed::Text("3".into()));
     mods.screen_closed(id);
     assert_eq!(typed(&mut mods).as_deref(), Some(""));
+}
+
+#[test]
+fn surface_heights_are_asked_and_answered() {
+    let mut mods = load("horizon_mods_test_guest.hmod");
+    let id = "test_guest";
+    let chat = |mods: &mut Mods| {
+        mods.drain().into_iter().find_map(|o| match o {
+            Output::Chat { text, .. } => Some(text),
+            _ => None,
+        })
+    };
+    // The query goes out in order with the mod's other world calls, its columns as given.
+    mods.drain();
+    mods.command("surface 7");
+    let asked: Vec<Output> = mods.drain();
+    assert_eq!(
+        asked,
+        [Output::Surface {
+            id: id.into(),
+            tag: 7,
+            columns: vec![(1, 2), (-3, 40)],
+            heightmap: Heightmap::MotionBlockingNoLeaves,
+        }]
+    );
+    // Nothing comes back until the game answers; then the answer, once, with its tag.
+    mods.command("heights");
+    assert_eq!(chat(&mut mods).as_deref(), Some(""));
+    mods.push_surface(
+        id,
+        SurfaceHeights {
+            tag: 7,
+            heights: vec![Some(64), None],
+        },
+    );
+    mods.push_surface(
+        id,
+        SurfaceHeights {
+            tag: 8,
+            heights: vec![Some(-60), Some(320)],
+        },
+    );
+    mods.command("heights");
+    assert_eq!(chat(&mut mods).as_deref(), Some("7: 64 none, 8: -60 320"));
+    mods.command("heights");
+    assert_eq!(chat(&mut mods).as_deref(), Some(""));
+    // A mod that has stopped is given none.
+    mods.command("panic");
+    mods.push_surface(
+        id,
+        SurfaceHeights {
+            tag: 9,
+            heights: vec![],
+        },
+    );
+}
+
+#[test]
+fn post_data_is_kept_versioned_and_capped() {
+    let mut mods = load("horizon_mods_test_guest.hmod");
+    mods.command("data 3");
+    let (words, v1) = mods.post().unwrap().data.unwrap();
+    assert_eq!(&words[..], &[0, 1, 2]);
+    // The same words again: the same version (nothing to upload).
+    mods.command("data 3");
+    assert_eq!(mods.post().unwrap().data.unwrap().1, v1);
+    mods.command("data 5");
+    let (words, v2) = mods.post().unwrap().data.unwrap();
+    assert_eq!(words.len(), 5);
+    assert_ne!(v1, v2);
+    // Over the cap: ignored, the last kept.
+    mods.command(&format!("data {}", POST_DATA_WORDS + 1));
+    assert_eq!(mods.post().unwrap().data.unwrap().1, v2);
+    mods.command(&format!("data {POST_DATA_WORDS}"));
+    assert_eq!(mods.post().unwrap().data.unwrap().0.len(), POST_DATA_WORDS);
 }
 
 #[test]

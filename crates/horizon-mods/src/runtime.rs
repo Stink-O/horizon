@@ -22,7 +22,7 @@ pub use bindings::horizon::mods::{
     hud::{Corner, Line},
     input::{Click, Event as InputEvent, HeldItem, ItemUse, Typed},
     ui::{Draw, Point, Rect},
-    world::{BlockEdit, BlockRun, Heightmap, Hit},
+    world::{BlockEdit, BlockRun, Heightmap, Hit, SurfaceHeights},
 };
 use bindings::{
     HorizonMod,
@@ -70,6 +70,12 @@ pub const EDIT_PALETTE: usize = 4096;
 /// A post pass's source, and its parameters.
 const POST_SOURCE: usize = 256 << 10;
 pub const POST_PARAMS: usize = 16;
+/// `render.set-data`: the words one call may give the pass (1 MiB).
+pub const POST_DATA_WORDS: usize = 1 << 18;
+/// `world.surface-height`: the columns one query may ask about, and the answers kept for a mod that does not poll
+/// them (the oldest are dropped).
+pub const SURFACE_COLUMNS: usize = 1 << 16;
+const SURFACE_KEPT: usize = 256;
 /// How far `world.raycast` sees: through the loaded chunks, then across the distant terrain (LOD Distance).
 pub const RAYCAST_MAX: f32 = 1024.0;
 /// The fastest flying speed `world.set-flying-speed` gives (vanilla's is 0.05).
@@ -102,6 +108,14 @@ pub enum Output {
     Commands { id: String, commands: Vec<String> },
     /// `world.edit-blocks`: block changes to make at once, in order with the commands.
     Edit { id: String, edit: BlockEdit },
+    /// `world.surface-height`: the heights of `columns` on `heightmap` to read, in order with the commands and the
+    /// edits, and give back to mod `id` with [`Mods::push_surface`] (with `tag`).
+    Surface {
+        id: String,
+        tag: u32,
+        columns: Vec<(i32, i32)>,
+        heightmap: Heightmap,
+    },
     /// `input.register-key`: the game lists the mods' keybinds again.
     Keys,
     /// `world.play-sound`.
@@ -134,6 +148,8 @@ pub struct Post {
     /// Changes when the source does: the game recompiles then.
     pub version: u64,
     pub params: [f32; POST_PARAMS],
+    /// `render.set-data`'s words, and a version that changes with them (none: never set, or cleared).
+    pub data: Option<(Arc<[u32]>, u64)>,
 }
 
 /// A mod's text panel, drawn every frame until it changes.
@@ -197,6 +213,9 @@ struct State {
     /// Capability `render`.
     post_source: Option<(Arc<str>, u64)>,
     post_params: Option<[f32; POST_PARAMS]>,
+    post_data: Option<(Arc<[u32]>, u64)>,
+    /// Capability `world`: answers to its `surface-height` queries, for its next `poll-surface-heights`.
+    surface: Vec<SurfaceHeights>,
     /// Capability `world`: the flying speed it wants the player to have.
     flying_speed: Option<f32>,
 }
@@ -341,6 +360,8 @@ impl Mods {
             cursor: None,
             post_source: None,
             post_params: None,
+            post_data: None,
+            surface: Vec::new(),
             flying_speed: None,
         };
         let mut store = Store::new(engine, state);
@@ -564,6 +585,16 @@ impl Mods {
             queue.push(typed);
         }
     }
+    /// The answer to mod `id`'s `surface-height` query, for its next `poll-surface-heights`.
+    pub fn push_surface(&mut self, id: &str, answer: SurfaceHeights) {
+        if let Some(run) = self.running_mut(id) {
+            let queue = &mut run.store.data_mut().surface;
+            if queue.len() >= SURFACE_KEPT {
+                queue.remove(0);
+            }
+            queue.push(answer);
+        }
+    }
     /// What mod `id`'s screen draws, while it is open.
     pub fn screen(&self, id: &str) -> Option<&[Draw]> {
         self.running(id)?.store.data().screen.as_deref()
@@ -591,6 +622,7 @@ impl Mods {
                 source,
                 version,
                 params: s.post_params?,
+                data: s.post_data.clone(),
             })
         })
     }
@@ -851,6 +883,22 @@ impl render::Host for State {
     fn clear_post(&mut self) {
         self.post_source = None;
         self.post_params = None;
+        self.post_data = None;
+    }
+    fn set_data(&mut self, words: Vec<u32>) {
+        if words.len() > POST_DATA_WORDS {
+            log::warn!(
+                "[mod {}] post pass data over {} KiB, ignored",
+                self.id,
+                (POST_DATA_WORDS * 4) >> 10
+            );
+            return;
+        }
+        if self.post_data.as_ref().is_some_and(|(d, _)| **d == *words) {
+            return;
+        }
+        let version = self.post_data.as_ref().map_or(1, |(_, v)| v + 1);
+        self.post_data = Some((Arc::from(words), version));
     }
     fn shake(&mut self, strength: f32, seconds: f32) {
         let shakes = self
@@ -929,6 +977,25 @@ impl world::Host for State {
             let id = self.id.clone();
             self.out.push(Output::Edit { id, edit });
         }
+    }
+    fn surface_height(&mut self, tag: u32, columns: Vec<(i32, i32)>, heightmap: Heightmap) {
+        if columns.len() > SURFACE_COLUMNS {
+            log::warn!(
+                "[mod {}] surface-height over {SURFACE_COLUMNS} columns; left out",
+                self.id
+            );
+            return;
+        }
+        let id = self.id.clone();
+        self.out.push(Output::Surface {
+            id,
+            tag,
+            columns,
+            heightmap,
+        });
+    }
+    fn poll_surface_heights(&mut self) -> Vec<SurfaceHeights> {
+        std::mem::take(&mut self.surface)
     }
     fn set_flying_speed(&mut self, speed: Option<f32>) {
         self.flying_speed = speed

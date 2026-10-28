@@ -103,6 +103,27 @@ impl Game<'_> {
         Ok(out.changed)
     }
 
+    /// `world.surface-height`: each column's height on `h` as `edit_height` reads it, none where its chunk is not
+    /// loaded. (A chunk read is looked up once for a run of columns in it.)
+    pub(super) fn surface_heights(&self, columns: &[(i32, i32)], h: Heightmap) -> Vec<Option<i32>> {
+        let mut last: Option<((i32, i32), bool)> = None;
+        columns
+            .iter()
+            .map(|&(x, z)| {
+                let key = (x >> 4, z >> 4);
+                let loaded = match last {
+                    Some((k, l)) if k == key => l,
+                    _ => {
+                        let l = self.world.chunks.get(&key).is_some();
+                        last = Some((key, l));
+                        l
+                    }
+                };
+                loaded.then(|| self.edit_height(h, x, z))
+            })
+            .collect()
+    }
+
     /// One above the highest block of column (x, z) that counts on heightmap `h`, or the bottom of the world (also
     /// where it is not loaded).
     fn edit_height(&self, h: Heightmap, x: i32, z: i32) -> i32 {

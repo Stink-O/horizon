@@ -1130,6 +1130,15 @@ fn select_creative_tab(
     clicks.skip_release();
 }
 
+/// A mod's post pass this frame (`Game::mod_post_pass`): its source, the source's version, its parameters and its
+/// data with the data's version.
+type ModPostPass = (
+    std::sync::Arc<str>,
+    u64,
+    [f32; 16],
+    Option<(std::sync::Arc<[u32]>, u64)>,
+);
+
 struct Game<'a> {
     /// Shared with an integrated server; `collision` and `motion` borrow from it.
     res: Arc<Resources>,
@@ -10120,11 +10129,12 @@ impl Game<'_> {
         };
         let mod_post = self.mod_post_pass();
         let frame = Frame {
-            mod_post: mod_post.as_ref().map(|(source, version, params)| {
+            mod_post: mod_post.as_ref().map(|(source, version, params, data)| {
                 horizon_client::gfx::ModPost {
                     source,
                     version: *version,
                     params: *params,
+                    data: data.as_ref().map(|(d, v)| (&d[..], *v)),
                     day_fraction: (self.world.day_time.rem_euclid(24_000) as f32 + alpha as f32)
                         / 24_000.0,
                     partial_tick: alpha as f32,

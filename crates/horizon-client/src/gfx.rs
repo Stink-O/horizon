@@ -295,6 +295,8 @@ pub struct ModPost<'a> {
     pub source: &'a str,
     pub version: u64,
     pub params: [f32; 16],
+    /// The words it reads as `mod_data` (`render.set-data`), and a version that changes with them.
+    pub data: Option<(&'a [u32], u64)>,
     /// The time of day (0 sunrise, 0.25 noon) and the partial tick, for `frame.time`.
     pub day_fraction: f32,
     pub partial_tick: f32,
@@ -4033,6 +4035,7 @@ impl Renderer {
                 for (to, from) in uniform.mod_params.iter_mut().zip(mp.params.chunks(4)) {
                     to.copy_from_slice(from);
                 }
+                self.mod_post.set_data(&self.device, &self.queue, mp.data);
                 self.mod_post
                     .run(
                         &self.device,

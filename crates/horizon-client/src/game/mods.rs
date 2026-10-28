@@ -57,6 +57,9 @@ pub(super) struct ModsState {
     flying: Option<f32>,
     #[cfg(feature = "mods")]
     flying_sent: Option<u64>,
+    /// Answers to the mods' `world.surface-height` queries, read on the world's thread, for their next tick.
+    #[cfg(feature = "mods")]
+    surface: std::sync::Arc<std::sync::Mutex<Vec<(String, horizon_mods::SurfaceHeights)>>>,
 }
 impl ModsState {
     /// The chat's command tree: vanilla's, plus the running mods' commands.
@@ -184,7 +187,7 @@ impl Game<'_> {
     }
     pub(super) fn mods_chat(&mut self, _line: &str) {}
     pub(super) fn draw_mod_panels(&self, _batch: &mut HudBatch, _corners: &mut Corners) {}
-    pub(super) fn mod_post_pass(&self) -> Option<(std::sync::Arc<str>, u64, [f32; 16])> {
+    pub(super) fn mod_post_pass(&self) -> Option<super::ModPostPass> {
         None
     }
     pub(super) fn mod_use_start(&mut self) -> bool {
@@ -203,12 +206,13 @@ impl Game<'_> {
 
 #[cfg(feature = "mods")]
 impl Game<'_> {
-    /// A running mod's post pass (capability `render`): its source, the source's version and its parameters.
-    pub(super) fn mod_post_pass(&self) -> Option<(std::sync::Arc<str>, u64, [f32; 16])> {
+    /// A running mod's post pass (capability `render`): its source, the source's version, its parameters and its
+    /// data (with the data's version).
+    pub(super) fn mod_post_pass(&self) -> Option<super::ModPostPass> {
         self.mods
             .mods
             .post()
-            .map(|p| (p.source, p.version, p.params))
+            .map(|p| (p.source, p.version, p.params, p.data))
     }
     /// Reads `horizon-mods/` and the dev mods, and starts the ones turned on.
     pub(super) fn start_mods(&mut self) {
@@ -401,6 +405,16 @@ impl Game<'_> {
     /// A game tick.
     pub(super) fn tick_mods(&mut self) {
         if self.mods.mods.is_running() {
+            // (the world's answers to their height queries since the last tick)
+            let answers = self
+                .mods
+                .surface
+                .lock()
+                .map(|mut a| std::mem::take(&mut *a))
+                .unwrap_or_default();
+            for (id, answer) in answers {
+                self.mods.mods.push_surface(&id, answer);
+            }
             let snapshot = self.mod_snapshot();
             self.mods.mods.set_snapshot(snapshot);
             let ticks = self.ticks;
@@ -527,6 +541,15 @@ impl Game<'_> {
                 }
                 Output::Edit { id, edit } => {
                     self.run_mod_edit(&id, edit);
+                    continue;
+                }
+                Output::Surface {
+                    id,
+                    tag,
+                    columns,
+                    heightmap,
+                } => {
+                    self.run_mod_surface(id, tag, columns, heightmap);
                     continue;
                 }
                 Output::Sound {
@@ -842,6 +865,53 @@ impl Game<'_> {
             return;
         }
         self.edit_blocks_logged(id, &edit);
+    }
+    /// `world.surface-height`: read where the edits are made, in order with them, the answer queued for the mod's
+    /// next tick.
+    fn run_mod_surface(
+        &mut self,
+        id: String,
+        tag: u32,
+        columns: Vec<(i32, i32)>,
+        heightmap: horizon_mods::Heightmap,
+    ) {
+        let answers = self.mods.surface.clone();
+        let answer = move |heights: Vec<Option<i32>>| {
+            if let Ok(mut a) = answers.lock() {
+                a.push((id, horizon_mods::SurfaceHeights { tag, heights }));
+            }
+        };
+        if let Some(server) = &self.integrated {
+            server.execute(move |g| {
+                let heights = g.in_owner_level(|g| g.surface_heights_timed(&columns, heightmap));
+                answer(heights);
+            });
+            return;
+        }
+        if self.remote.is_some() {
+            answer(vec![None; columns.len()]);
+            return;
+        }
+        answer(self.surface_heights_timed(&columns, heightmap));
+    }
+    /// A mod's height query, its time logged with `HORIZON_SPIKES` as an edit's is.
+    pub(super) fn surface_heights_timed(
+        &self,
+        columns: &[(i32, i32)],
+        heightmap: horizon_mods::Heightmap,
+    ) -> Vec<Option<i32>> {
+        let started = std::time::Instant::now();
+        let out = horizon_client::spans::time("mod_surface_height", || {
+            self.surface_heights(columns, heightmap)
+        });
+        let ms = started.elapsed().as_secs_f32() * 1000.0;
+        if self.options.spikes.is_some_and(|threshold| ms > threshold) {
+            log::info!(
+                "Horizon: slow mod height query {ms:.1} ms ({} columns)",
+                columns.len()
+            );
+        }
+        out
     }
     /// An edit, its time logged with `HORIZON_SPIKES` as the commands' is, its errors as the mod's.
     pub(super) fn edit_blocks_logged(&mut self, id: &str, edit: &horizon_mods::BlockEdit) {

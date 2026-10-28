@@ -75,7 +75,10 @@ folder, loads no runtime and plays exactly like vanilla 26.3.
 - **Snapshots, not callbacks into the world.** Once per tick (and before a
   command) the game copies what mods may read (player position, look, health,
   food, dimension, world clock) into a snapshot shared by all mods. Mods never
-  hold references into the game, so they cannot stall or corrupt it.
+  hold references into the game, so they cannot stall or corrupt it. What
+  the snapshot does not hold is asked for and answered later
+  (`world.surface-height`, `poll-surface-heights`): the world answers
+  between its own ticks, on its own thread, and the mod never waits on it.
 
 ### What a mod can do (API 0.1)
 
@@ -88,8 +91,8 @@ folder, loads no runtime and plays exactly like vanilla 26.3.
 | `storage` | `storage` | `get(key)`, `set(key, value)`, `delete(key)`: a per-mod folder of up to 64 files, 4 MiB total, at most 1 MiB written per call |
 | `input` | `input` | `claim-items(ids)`: right-clicks with those items are the mod's (`use-start`, `use-stop` with the ticks held; no zoom, placing or swing); `register-key(name, label, key)`: listed in Options > Controls under the mod's name, rebindable (saved in horizon-mod-keys.txt); `held()`; `poll()`: the events since the last call (at most 256 kept); `poll-typed()`: what was typed on its screen since the last call, as text and the names of the keys that type none (Backspace, Enter, the arrows, ...) |
 | `ui` | `ui` | `show(draws)`: opens the mod's screen (or redraws it) from fills, quads, sprites, items and text in GUI pixels from the centre, up to 4096; `close()`; `cursor()`. Clicks, typing and Escape come back through `input`; the screen does not pause |
-| `render` | `render` | `set-post(wgsl)`: a post-processing pass (WGSL after the [mod pass prelude](#a-mods-post-pass)), drawn over the world before a shader pack's post-processing; `set-params(16 floats)`, read as `frame.mod_params`; `clear-post()`; `shake(strength, seconds)`: a camera jolt that fades out (jolts add up; scaled by Distortion Effects) |
-| `world` | `world` | `raycast(distance)`: the first block along the view, up to 1024 blocks (past the render distance only across the distant terrain, with LOD Distance on); `run-commands(list)`: at operator level, silently, this tick (up to 8192 per call; single player and LAN hosts only); `play-sound(event, at, volume, pitch)`; `edit-blocks(edit)`: many blocks at once, straight into the chunk sections (a palette of block states, filters, and runs up columns, each from a height or a heightmap; as `fill ... strict`, in order with `run-commands`; each chunk changed is lit again once off the world's thread, remeshed once and sent whole; up to 1,048,576 runs a call; single player and LAN hosts only); `set-flying-speed(speed)`: the player's creative flying speed (vanilla's 0.05, at most 50), kept through respawns, game mode changes and other worlds until the mod changes it or stops (single player and LAN hosts only) |
+| `render` | `render` | `set-post(wgsl)`: a post-processing pass (WGSL after the [mod pass prelude](#a-mods-post-pass)), drawn over the world before a shader pack's post-processing; `set-params(16 floats)`, read as `frame.mod_params`; `set-data(words)`: up to 262,144 `u32` words (1 MiB), read as the storage buffer `mod_data`, uploaded only when they change; `clear-post()` (the source, the parameters and the data); `shake(strength, seconds)`: a camera jolt that fades out (jolts add up; scaled by Distortion Effects) |
+| `world` | `world` | `raycast(distance)`: the first block along the view, up to 1024 blocks (past the render distance only across the distant terrain, with LOD Distance on); `run-commands(list)`: at operator level, silently, this tick (up to 8192 per call; single player and LAN hosts only); `play-sound(event, at, volume, pitch)`; `edit-blocks(edit)`: many blocks at once, straight into the chunk sections (a palette of block states, filters, and runs up columns, each from a height or a heightmap; as `fill ... strict`, in order with `run-commands`; each chunk changed is lit again once off the world's thread, remeshed once and sent whole; up to 1,048,576 runs a call; single player and LAN hosts only); `surface-height(tag, columns, heightmap)` and `poll-surface-heights()`: the height of up to 65,536 columns a query on a heightmap (the one `edit-blocks` counts from; none where a chunk is not loaded), read on the world's thread in order with `run-commands` and `edit-blocks`, answered a tick or two later with its `tag` (the mod never waits on the world; on a remote server every height is none); `set-flying-speed(speed)`: the player's creative flying speed (vanilla's 0.05, at most 50), kept through respawns, game mode changes and other worlds until the mod changes it or stops (single player and LAN hosts only) |
 
 | Hook (export) | When |
 |---|---|
@@ -122,6 +125,9 @@ The game puts [`gfx/mod_post.wgsl`](../crates/horizon-client/src/gfx/mod_post.wg
   height and their reciprocals), `time` (seconds, frames, the time of day, the partial tick), `sun`, `sky_color`,
   `fog_color`, `view_params` (near, far, render distance, vertical field of view) and the mod's sixteen
   `mod_params`;
+- `mod_data`, a read-only storage buffer of `u32` (binding 5): the words the mod gives with `render.set-data`, one
+  word (0) until it gives some, so read `arrayLength(&mod_data)` before indexing it (`bitcast<f32>` for floats). For
+  what does not fit in sixteen floats: per-object poses worked out by the mod, a model's triangles;
 - `StageIn` (the pixel's `position` and its `uv`, 0,0 at the top left), and helpers: `depth_at`, `is_sky`,
   `linear_depth`, `view_position`, `world_offset` (a pixel's position relative to the camera), `luminance`,
   `srgb_to_linear`, `linear_to_srgb`.

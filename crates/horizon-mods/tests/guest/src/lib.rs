@@ -3,9 +3,11 @@
 //! capability `storage` on a fixed key, `/save_key <key> <text>` exercises
 //! it on an arbitrary key (for the quota and key-count limits), `/fly
 //! <speed>|none` sets the flying speed, `/screen` opens an empty screen and
-//! `/typed` chats what was typed on it; `tick` and `frame` do nothing, to
-//! measure the cost of a call.
-use horizon_mod_sdk::{Mod, Registration, chat, input, storage, ui, world};
+//! `/typed` chats what was typed on it, `/surface <tag>` asks for the heights
+//! of columns (1, 2) and (-3, 40), `/heights` chats the answers come back,
+//! `/data <n>` gives a post pass the words 0..n; `tick` and `frame` do
+//! nothing, to measure the cost of a call.
+use horizon_mod_sdk::{Mod, Registration, chat, input, render, storage, ui, world};
 
 struct Guest {
     ticks: u64,
@@ -15,6 +17,7 @@ impl Mod for Guest {
     fn init() -> Result<(Self, Registration), String> {
         let hooks = [
             "spin", "panic", "grow", "hello", "save", "load", "save_key", "fly", "screen", "typed",
+            "surface", "heights", "data",
         ]
         .into_iter()
         .fold(Registration::new(), Registration::command)
@@ -73,6 +76,33 @@ impl Mod for Guest {
                     })
                     .collect();
                 chat::show(&typed.join(", "));
+                Ok(None)
+            }
+            "surface" => {
+                let tag = args.parse().map_err(|_| "Usage: /surface <tag>")?;
+                world::surface_height(tag, &[(1, 2), (-3, 40)], world::Heightmap::MotionBlockingNoLeaves);
+                Ok(None)
+            }
+            "heights" => {
+                let answers: Vec<String> = world::poll_surface_heights()
+                    .into_iter()
+                    .map(|a| {
+                        let hs: Vec<String> = a
+                            .heights
+                            .iter()
+                            .map(|h| h.map_or("none".into(), |y| y.to_string()))
+                            .collect();
+                        format!("{}: {}", a.tag, hs.join(" "))
+                    })
+                    .collect();
+                chat::show(&answers.join(", "));
+                Ok(None)
+            }
+            "data" => {
+                let n: u32 = args.parse().map_err(|_| "Usage: /data <n>")?;
+                render::set_post("@fragment fn fs_main(in: StageIn) -> @location(0) vec4<f32> { return vec4<f32>(1.0); }");
+                render::set_params(&[0.0; 16]);
+                render::set_data(&(0..n).collect::<Vec<u32>>());
                 Ok(None)
             }
             _ => {

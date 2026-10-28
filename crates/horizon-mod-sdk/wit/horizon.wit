@@ -206,8 +206,16 @@ interface render {
     /// Sixteen floats the pass reads as `frame.mod_params[0..4]`, kept until
     /// changed. The pass runs only while some are set.
     set-params: func(params: list<f32>);
-    /// Stops the pass: no source and no parameters until the next `set-post` and `set-params`.
+    /// Stops the pass: no source, no parameters and no data until the next
+    /// `set-post` and `set-params`.
     clear-post: func();
+    /// Words the pass reads as `mod_data` (`var<storage, read> mod_data:
+    /// array<u32>`, binding 5 of the prelude; `bitcast<f32>` for floats),
+    /// kept until changed or the pass is cleared. Until some are set it
+    /// holds one word, 0: read `arrayLength(&mod_data)` before indexing.
+    /// Uploaded to the GPU only when they change. At most 262,144 words
+    /// (1 MiB) a call; more are ignored (logged).
+    set-data: func(words: list<u32>);
     /// Shakes the camera: a jolt of `strength` (0 to 1, 1 the hardest) that
     /// fades out over `seconds` (at most 30). Jolts add up. The game turns
     /// the view (not the player) with smooth noise, scaled by the player's
@@ -301,6 +309,28 @@ interface %world {
     /// that does not parse, or an index past the end, leaves the whole edit
     /// out (logged). On a remote server it is ignored and logged.
     edit-blocks: func(edit: block-edit);
+    /// The answer to a `surface-height` query: its `tag`, and for each of
+    /// its columns, in order, the height asked for (one above the highest
+    /// block that counts on that heightmap, as `edit-blocks` reads it), or
+    /// none where the column's chunk is not loaded.
+    record surface-heights {
+        tag: u32,
+        heights: list<option<s32>>,
+    }
+    /// Asks the world for the height of each of `columns` (x, z) on
+    /// `heightmap`. The world is read where `edit-blocks` changes it, on its
+    /// own thread, in order with `run-commands` and `edit-blocks` (a query
+    /// made after an edit sees it), and the answer comes back through
+    /// `poll-surface-heights`, with the `tag` given here: a tick or two later
+    /// in single player (the world answers between two of its ticks; the mod
+    /// never waits on it). Chunks a mod keeps loaded (`forceload`) are read
+    /// as any other. At most 65,536 columns a call; a query with more is left
+    /// out (logged). On a remote server every height is none, answered at
+    /// once.
+    surface-height: func(tag: u32, columns: list<tuple<s32, s32>>, heightmap: heightmap);
+    /// The answers to `surface-height` queries that came back since the
+    /// last call, oldest first.
+    poll-surface-heights: func() -> list<surface-heights>;
 }
 
 /// What the game calls. Only the hooks `init` asks for are ever called.

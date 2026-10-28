@@ -230,7 +230,8 @@ Capability `render`: a post-processing pass the mod supplies, drawn over the wor
 | --- | --- | --- |
 | `set-post` | `func(wgsl: string)` | The pass: a WGSL fragment shader with an `fs_main` entry, after the mod pass prelude (docs/mods.md, "A mod's post pass": the world's colour and depth, a `Frame` uniform and helpers). Compiled once per distinct source; an error is logged and the pass skipped. |
 | `set-params` | `func(params: list<f32>)` | Sixteen floats the pass reads as `frame.mod_params[0..4]`, kept until changed. The pass runs only while some are set. |
-| `clear-post` | `func()` | Stops the pass: no source and no parameters until the next `set-post` and `set-params`. |
+| `clear-post` | `func()` | Stops the pass: no source, no parameters and no data until the next `set-post` and `set-params`. |
+| `set-data` | `func(words: list<u32>)` | Words the pass reads as `mod_data` (`var<storage, read> mod_data: array<u32>`, binding 5 of the prelude; `bitcast<f32>` for floats), kept until changed or the pass is cleared. Until some are set it holds one word, 0: read `arrayLength(&mod_data)` before indexing. Uploaded to the GPU only when they change. At most 262,144 words (1 MiB) a call; more are ignored (logged). |
 | `shake` | `func(strength: f32, seconds: f32)` | Shakes the camera: a jolt of `strength` (0 to 1, 1 the hardest) that fades out over `seconds` (at most 30). Jolts add up. The game turns the view (not the player) with smooth noise, scaled by the player's Distortion Effects option. |
 
 ## `world`
@@ -286,6 +287,15 @@ Block changes made at once, straight into the world's chunk sections (see `edit-
 | `filters` | `list<string>` | What a run may require of the block it replaces, as `fill ... replace` takes it: `minecraft:air`, `#minecraft:logs`. |
 | `runs` | `list<block-run>` | Made in order, each seeing the changes of those before it. |
 
+### record `surface-heights`
+
+The answer to a `surface-height` query: its `tag`, and for each of its columns, in order, the height asked for (one above the highest block that counts on that heightmap, as `edit-blocks` reads it), or none where the column's chunk is not loaded.
+
+| Field | Type | |
+| --- | --- | --- |
+| `tag` | `u32` |  |
+| `heights` | `list<option<s32>>` |  |
+
 | Function | Signature | What it does |
 | --- | --- | --- |
 | `raycast` | `func(distance: f32) -> option<hit>` | The first block along the player's view (fluids pass), up to `distance` blocks (at most 1024; past the loaded chunks, across the distant terrain when LOD Distance is on), as of this tick. |
@@ -293,6 +303,8 @@ Block changes made at once, straight into the world's chunk sections (see `edit-
 | `play-sound` | `func(event: string, at: option<tuple<f64, f64, f64>>, volume: f32, pitch: f32)` | A sound event (vanilla's or a resource pack's) at a point, or following the player when `at` is none. |
 | `set-flying-speed` | `func(speed: option<f32>)` | The local player's flying speed (creative flight), as vanilla's abilities hold it: 0.05 is vanilla's, sprinting doubles it, at most 50. The game keeps it until the mod changes it or stops, through respawns, game mode changes and other worlds; none (or a value that is not a number) puts vanilla's back. A spectator keeps the scroll wheel's speed. On a remote server it is ignored and logged. |
 | `edit-blocks` | `func(edit: block-edit)` | Sets many blocks at once, far faster than `fill` and `setblock`: a run per span of a column, each block its own palette entry if need be. Made on the world's thread right after this call returns, in order with `run-commands`, as `fill ... strict` makes them: nothing round them is told (no neighbour or shape updates, no drops, sand and gravel stay up, water and lava keep still), and a block entity goes with its block. Light is worked out again once for each chunk changed, off the world's thread, each chunk is remeshed once, and the players who see a chunk are sent it whole. Heights (`surface`) are read before any of the edit's changes. Only loaded chunks change, within the world's height; the rest of a run is left out. At most 1,048,576 runs and 4,096 palette entries and filters a call. A block or filter that does not parse, or an index past the end, leaves the whole edit out (logged). On a remote server it is ignored and logged. |
+| `surface-height` | `func(tag: u32, columns: list<tuple<s32, s32>>, heightmap: heightmap)` | Asks the world for the height of each of `columns` (x, z) on `heightmap`. The world is read where `edit-blocks` changes it, on its own thread, in order with `run-commands` and `edit-blocks` (a query made after an edit sees it), and the answer comes back through `poll-surface-heights`, with the `tag` given here: a tick or two later in single player (the world answers between two of its ticks; the mod never waits on it). Chunks a mod keeps loaded (`forceload`) are read as any other. At most 65,536 columns a call; a query with more is left out (logged). On a remote server every height is none, answered at once. |
+| `poll-surface-heights` | `func() -> list<surface-heights>` | The answers to `surface-height` queries that came back since the last call, oldest first. |
 
 ## `events`
 
