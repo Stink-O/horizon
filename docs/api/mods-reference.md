@@ -296,6 +296,17 @@ The answer to a `surface-height` query: its `tag`, and for each of its columns, 
 | `tag` | `u32` |  |
 | `heights` | `list<option<s32>>` |  |
 
+### record `column-blocks`
+
+The answer to a `read-columns` query: its `tag`; the names of the blocks it saw (`minecraft:snow`, without their properties), which `blocks` index; for each of its columns, in order, the height it counted from (as `surface-height` answers it), or none where the column's chunk is not loaded; and each column's blocks, `below` + `above` of them a column, bottom first: from `below` under that height up to `above` - 1 over it (a column that is not loaded, and what is outside the world's height, reads as air).
+
+| Field | Type | |
+| --- | --- | --- |
+| `tag` | `u32` |  |
+| `palette` | `list<string>` |  |
+| `bases` | `list<option<s32>>` |  |
+| `blocks` | `list<u16>` |  |
+
 | Function | Signature | What it does |
 | --- | --- | --- |
 | `raycast` | `func(distance: f32) -> option<hit>` | The first block along the player's view (fluids pass), up to `distance` blocks (at most 1024; past the loaded chunks, across the distant terrain when LOD Distance is on), as of this tick. |
@@ -305,6 +316,8 @@ The answer to a `surface-height` query: its `tag`, and for each of its columns, 
 | `edit-blocks` | `func(edit: block-edit)` | Sets many blocks at once, far faster than `fill` and `setblock`: a run per span of a column, each block its own palette entry if need be. Made on the world's thread right after this call returns, in order with `run-commands`, as `fill ... strict` makes them: nothing round them is told (no neighbour or shape updates, no drops, sand and gravel stay up, water and lava keep still), and a block entity goes with its block. Light is worked out again once for each chunk changed, off the world's thread, each chunk is remeshed once, and the players who see a chunk are sent it whole. Heights (`surface`) are read before any of the edit's changes. Only loaded chunks change, within the world's height; the rest of a run is left out. At most 1,048,576 runs and 4,096 palette entries and filters a call. A block or filter that does not parse, or an index past the end, leaves the whole edit out (logged). On a remote server it is ignored and logged. |
 | `surface-height` | `func(tag: u32, columns: list<tuple<s32, s32>>, heightmap: heightmap)` | Asks the world for the height of each of `columns` (x, z) on `heightmap`. The world is read where `edit-blocks` changes it, on its own thread, in order with `run-commands` and `edit-blocks` (a query made after an edit sees it), and the answer comes back through `poll-surface-heights`, with the `tag` given here: a tick or two later in single player (the world answers between two of its ticks; the mod never waits on it). Chunks a mod keeps loaded (`forceload`) are read as any other. At most 65,536 columns a call; a query with more is left out (logged). On a remote server every height is none, answered at once. |
 | `poll-surface-heights` | `func() -> list<surface-heights>` | The answers to `surface-height` queries that came back since the last call, oldest first. |
+| `read-columns` | `func(tag: u32, columns: list<tuple<s32, s32>>, heightmap: heightmap, below: u32, above: u32)` | Asks the world for the blocks of each of `columns` (x, z) round its height on `heightmap`: `below` blocks under it and `above` from it up. Read and answered as `surface-height` is, in order with `run-commands` and `edit-blocks`, through `poll-columns` with the `tag` given here, a tick or two later in single player. At most 65,536 columns, 64 blocks a column and 1,048,576 blocks a call; a query with more is left out (logged). On a remote server every column is none, answered at once. |
+| `poll-columns` | `func() -> list<column-blocks>` | The answers to `read-columns` queries that came back since the last call, oldest first. |
 
 ## `events`
 

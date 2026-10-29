@@ -74,7 +74,14 @@ impl Game<'_> {
         let watched = std::mem::take(&mut self.world.watched);
         let out = self.world.edit_runs(
             &runs,
-            |f, s| super::commands::block_input_matches(registry, tags, &filters[f as usize], BlockStateId(s)),
+            |f, s| {
+                super::commands::block_input_matches(
+                    registry,
+                    tags,
+                    &filters[f as usize],
+                    BlockStateId(s),
+                )
+            },
             |s| {
                 watched.get(s as usize).copied().unwrap_or(false)
                     || BlockEntity::for_block(&facts.get(BlockStateId(s)).name).is_some()
@@ -82,7 +89,13 @@ impl Game<'_> {
         );
         self.world.watched = watched;
         for &((x, y, z), old, new) in &out.tracked {
-            let watches = |id: u32| self.world.watched.get(id as usize).copied().unwrap_or(false);
+            let watches = |id: u32| {
+                self.world
+                    .watched
+                    .get(id as usize)
+                    .copied()
+                    .unwrap_or(false)
+            };
             if watches(old) || watches(new) {
                 self.world.watched_writes.push(((x, y, z), old, new));
             }
@@ -124,11 +137,71 @@ impl Game<'_> {
             .collect()
     }
 
+    /// `world.read-columns`: each column's height on `h` (none where its chunk is not loaded) and its blocks from `below`
+    /// under it to `above` - 1 over it, bottom first (air outside the world's height and where it is not loaded), the
+    /// blocks as indices into the names seen (the tag is the caller's).
+    pub(super) fn read_columns(
+        &self,
+        columns: &[(i32, i32)],
+        h: Heightmap,
+        below: u32,
+        above: u32,
+    ) -> horizon_mods::ColumnBlocks {
+        let bases = self.surface_heights(columns, h);
+        let per = (below + above) as usize;
+        let mut blocks = Vec::with_capacity(columns.len() * per);
+        let mut palette: Vec<String> = Vec::new();
+        // (a state's index into the names, worked out once a state)
+        let mut seen: FxHashMap<u32, u16> = FxHashMap::default();
+        let facts = self.res.facts();
+        let mut index = |s: BlockStateId| -> u16 {
+            *seen.entry(s.0).or_insert_with(|| {
+                let name = &facts.get(s).name;
+                let i = palette
+                    .iter()
+                    .position(|n| **n == **name)
+                    .unwrap_or_else(|| {
+                        palette.push(name.to_string());
+                        palette.len() - 1
+                    });
+                i as u16
+            })
+        };
+        let top = MIN_Y + horizon_client::chunk::HEIGHT - 1;
+        for (&(x, z), base) in columns.iter().zip(&bases) {
+            match base {
+                Some(b) => {
+                    let y0 = b - below as i32;
+                    for y in y0..y0 + per as i32 {
+                        let s = if (MIN_Y..=top).contains(&y) {
+                            self.world.block(x, y, z)
+                        } else {
+                            self.world.air
+                        };
+                        blocks.push(index(s));
+                    }
+                }
+                None => {
+                    let air = index(self.world.air);
+                    blocks.extend(std::iter::repeat_n(air, per));
+                }
+            }
+        }
+        horizon_mods::ColumnBlocks {
+            tag: 0,
+            palette,
+            bases,
+            blocks,
+        }
+    }
+
     /// One above the highest block of column (x, z) that counts on heightmap `h`, or the bottom of the world (also
     /// where it is not loaded).
     fn edit_height(&self, h: Heightmap, x: i32, z: i32) -> i32 {
         if h == Heightmap::WorldSurface {
-            return self.world.world_surface(x, z, |s| self.res.facts().is_air(s));
+            return self
+                .world
+                .world_surface(x, z, |s| self.res.facts().is_air(s));
         }
         let properties = &self.pack.assets.properties;
         let counts = |t: HeightmapType, s: BlockStateId| t.is_opaque(properties.heightmap_state(s));

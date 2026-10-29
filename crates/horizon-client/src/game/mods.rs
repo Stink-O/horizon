@@ -60,6 +60,9 @@ pub(super) struct ModsState {
     /// Answers to the mods' `world.surface-height` queries, read on the world's thread, for their next tick.
     #[cfg(feature = "mods")]
     surface: std::sync::Arc<std::sync::Mutex<Vec<(String, horizon_mods::SurfaceHeights)>>>,
+    /// Answers to the mods' `world.read-columns` queries, read on the world's thread, for their next tick.
+    #[cfg(feature = "mods")]
+    columns: std::sync::Arc<std::sync::Mutex<Vec<(String, horizon_mods::ColumnBlocks)>>>,
 }
 impl ModsState {
     /// The chat's command tree: vanilla's, plus the running mods' commands.
@@ -415,6 +418,15 @@ impl Game<'_> {
             for (id, answer) in answers {
                 self.mods.mods.push_surface(&id, answer);
             }
+            let answers = self
+                .mods
+                .columns
+                .lock()
+                .map(|mut a| std::mem::take(&mut *a))
+                .unwrap_or_default();
+            for (id, answer) in answers {
+                self.mods.mods.push_columns(&id, answer);
+            }
             let snapshot = self.mod_snapshot();
             self.mods.mods.set_snapshot(snapshot);
             let ticks = self.ticks;
@@ -550,6 +562,17 @@ impl Game<'_> {
                     heightmap,
                 } => {
                     self.run_mod_surface(id, tag, columns, heightmap);
+                    continue;
+                }
+                Output::Columns {
+                    id,
+                    tag,
+                    columns,
+                    heightmap,
+                    below,
+                    above,
+                } => {
+                    self.run_mod_columns(id, tag, columns, heightmap, (below, above));
                     continue;
                 }
                 Output::Sound {
@@ -893,6 +916,61 @@ impl Game<'_> {
             return;
         }
         answer(self.surface_heights_timed(&columns, heightmap));
+    }
+    /// `world.read-columns`: read where the edits are made, in order with them, the answer queued for the mod's next
+    /// tick.
+    fn run_mod_columns(
+        &mut self,
+        id: String,
+        tag: u32,
+        columns: Vec<(i32, i32)>,
+        heightmap: horizon_mods::Heightmap,
+        span: (u32, u32),
+    ) {
+        let answers = self.mods.columns.clone();
+        let answer = move |mut blocks: horizon_mods::ColumnBlocks| {
+            blocks.tag = tag;
+            if let Ok(mut a) = answers.lock() {
+                a.push((id, blocks));
+            }
+        };
+        if let Some(server) = &self.integrated {
+            server.execute(move |g| {
+                let blocks = g.in_owner_level(|g| g.read_columns_timed(&columns, heightmap, span));
+                answer(blocks);
+            });
+            return;
+        }
+        if self.remote.is_some() {
+            answer(horizon_mods::ColumnBlocks {
+                tag,
+                palette: Vec::new(),
+                bases: vec![None; columns.len()],
+                blocks: vec![0; columns.len() * (span.0 + span.1) as usize],
+            });
+            return;
+        }
+        answer(self.read_columns_timed(&columns, heightmap, span));
+    }
+    /// A mod's column read, its time logged with `HORIZON_SPIKES` as an edit's is.
+    pub(super) fn read_columns_timed(
+        &self,
+        columns: &[(i32, i32)],
+        heightmap: horizon_mods::Heightmap,
+        (below, above): (u32, u32),
+    ) -> horizon_mods::ColumnBlocks {
+        let started = std::time::Instant::now();
+        let out = horizon_client::spans::time("mod_read_columns", || {
+            self.read_columns(columns, heightmap, below, above)
+        });
+        let ms = started.elapsed().as_secs_f32() * 1000.0;
+        if self.options.spikes.is_some_and(|threshold| ms > threshold) {
+            log::info!(
+                "Horizon: slow mod column read {ms:.1} ms ({} columns)",
+                columns.len()
+            );
+        }
+        out
     }
     /// A mod's height query, its time logged with `HORIZON_SPIKES` as an edit's is.
     pub(super) fn surface_heights_timed(

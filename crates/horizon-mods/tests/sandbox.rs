@@ -1,8 +1,9 @@
 //! Loads real mods built with the SDK: the coords-hud example and a guest
 //! that misbehaves on command. Needs `rustup target add wasm32-unknown-unknown`.
 use horizon_mods::{
-    Clock, Corner, FLYING_SPEED_MAX, Heightmap, Mods, Output, POST_DATA_WORDS, Package, Player,
-    Snapshot, Status, SurfaceHeights, Typed, manifest::componentize,
+    COLUMN_BLOCKS, COLUMNS_BLOCKS_MAX, Clock, ColumnBlocks, Corner, FLYING_SPEED_MAX, Heightmap,
+    Mods, Output, POST_DATA_WORDS, Package, Player, Snapshot, Status, SurfaceHeights, Typed,
+    manifest::componentize,
 };
 use std::{
     path::{Path, PathBuf},
@@ -248,6 +249,78 @@ fn surface_heights_are_asked_and_answered() {
             tag: 9,
             heights: vec![],
         },
+    );
+}
+
+#[test]
+fn columns_are_asked_answered_and_capped() {
+    let mut mods = load("horizon_mods_test_guest.hmod");
+    let id = "test_guest";
+    let chat = |mods: &mut Mods| {
+        mods.drain().into_iter().find_map(|o| match o {
+            Output::Chat { text, .. } => Some(text),
+            _ => None,
+        })
+    };
+    mods.drain();
+    // The query goes out as asked, in order with the mod's other world calls.
+    mods.command("columns 3 2 1 2");
+    assert_eq!(
+        mods.drain(),
+        [Output::Columns {
+            id: id.into(),
+            tag: 3,
+            columns: vec![(0, 0), (1, -1)],
+            heightmap: Heightmap::MotionBlockingNoLeaves,
+            below: 1,
+            above: 2,
+        }]
+    );
+    // Nothing comes back until the game answers; then the answer, once, its blocks indexing its names.
+    mods.command("blocks");
+    assert_eq!(chat(&mut mods).as_deref(), Some(""));
+    mods.push_columns(
+        id,
+        ColumnBlocks {
+            tag: 3,
+            palette: vec![
+                "minecraft:stone".into(),
+                "minecraft:air".into(),
+                "minecraft:snow".into(),
+            ],
+            bases: vec![Some(70), None],
+            blocks: vec![0, 2, 1, 1, 1, 1],
+        },
+    );
+    mods.command("blocks");
+    assert_eq!(
+        chat(&mut mods).as_deref(),
+        Some(
+            "3: 70 none | minecraft:stone minecraft:snow minecraft:air minecraft:air minecraft:air minecraft:air"
+        )
+    );
+    mods.command("blocks");
+    assert_eq!(chat(&mut mods).as_deref(), Some(""));
+    // Over the caps (blocks a column, blocks in all): left out.
+    mods.command(&format!("columns 4 1 {} 1", COLUMN_BLOCKS));
+    assert!(
+        mods.drain()
+            .iter()
+            .all(|o| !matches!(o, Output::Columns { .. }))
+    );
+    let n = COLUMNS_BLOCKS_MAX / 32 + 1;
+    mods.command(&format!("columns 5 {n} 16 16"));
+    assert!(
+        mods.drain()
+            .iter()
+            .all(|o| !matches!(o, Output::Columns { .. }))
+    );
+    // At the caps: asked.
+    mods.command(&format!("columns 6 {} 16 16", COLUMNS_BLOCKS_MAX / 32));
+    assert!(
+        mods.drain()
+            .iter()
+            .any(|o| matches!(o, Output::Columns { tag: 6, .. }))
     );
 }
 

@@ -22,7 +22,7 @@ pub use bindings::horizon::mods::{
     hud::{Corner, Line},
     input::{Click, Event as InputEvent, HeldItem, ItemUse, Typed},
     ui::{Draw, Point, Rect},
-    world::{BlockEdit, BlockRun, Heightmap, Hit, SurfaceHeights},
+    world::{BlockEdit, BlockRun, ColumnBlocks, Heightmap, Hit, SurfaceHeights},
 };
 use bindings::{
     HorizonMod,
@@ -76,6 +76,12 @@ pub const POST_DATA_WORDS: usize = 1 << 18;
 /// them (the oldest are dropped).
 pub const SURFACE_COLUMNS: usize = 1 << 16;
 const SURFACE_KEPT: usize = 256;
+/// `world.read-columns`: the columns, the blocks a column and the blocks in all one query may ask for, and the answers
+/// kept for a mod that does not poll them.
+pub const COLUMNS_MAX: usize = 1 << 16;
+pub const COLUMN_BLOCKS: u32 = 64;
+pub const COLUMNS_BLOCKS_MAX: usize = 1 << 20;
+const COLUMNS_KEPT: usize = 16;
 /// How far `world.raycast` sees: through the loaded chunks, then across the distant terrain (LOD Distance).
 pub const RAYCAST_MAX: f32 = 1024.0;
 /// The fastest flying speed `world.set-flying-speed` gives (vanilla's is 0.05).
@@ -115,6 +121,17 @@ pub enum Output {
         tag: u32,
         columns: Vec<(i32, i32)>,
         heightmap: Heightmap,
+    },
+    /// `world.read-columns`: the blocks of `columns` round their heights on `heightmap` (`below` under, `above` from
+    /// it up) to read, in order with the commands and the edits, and give back to mod `id` with
+    /// [`Mods::push_columns`] (with `tag`).
+    Columns {
+        id: String,
+        tag: u32,
+        columns: Vec<(i32, i32)>,
+        heightmap: Heightmap,
+        below: u32,
+        above: u32,
     },
     /// `input.register-key`: the game lists the mods' keybinds again.
     Keys,
@@ -216,6 +233,8 @@ struct State {
     post_data: Option<(Arc<[u32]>, u64)>,
     /// Capability `world`: answers to its `surface-height` queries, for its next `poll-surface-heights`.
     surface: Vec<SurfaceHeights>,
+    /// Capability `world`: answers to its `read-columns` queries, for its next `poll-columns`.
+    columns: Vec<ColumnBlocks>,
     /// Capability `world`: the flying speed it wants the player to have.
     flying_speed: Option<f32>,
 }
@@ -362,6 +381,7 @@ impl Mods {
             post_params: None,
             post_data: None,
             surface: Vec::new(),
+            columns: Vec::new(),
             flying_speed: None,
         };
         let mut store = Store::new(engine, state);
@@ -590,6 +610,16 @@ impl Mods {
         if let Some(run) = self.running_mut(id) {
             let queue = &mut run.store.data_mut().surface;
             if queue.len() >= SURFACE_KEPT {
+                queue.remove(0);
+            }
+            queue.push(answer);
+        }
+    }
+    /// The answer to mod `id`'s `read-columns` query, for its next `poll-columns`.
+    pub fn push_columns(&mut self, id: &str, answer: ColumnBlocks) {
+        if let Some(run) = self.running_mut(id) {
+            let queue = &mut run.store.data_mut().columns;
+            if queue.len() >= COLUMNS_KEPT {
                 queue.remove(0);
             }
             queue.push(answer);
@@ -959,9 +989,11 @@ impl world::Host for State {
         }
         let palette = edit.palette.len();
         let filters = edit.filters.len();
-        if let Some(bad) = edit.runs.iter().find(|r| {
-            r.block as usize >= palette || r.only.is_some_and(|f| f as usize >= filters)
-        }) {
+        if let Some(bad) = edit
+            .runs
+            .iter()
+            .find(|r| r.block as usize >= palette || r.only.is_some_and(|f| f as usize >= filters))
+        {
             log::warn!(
                 "[mod {}] edit-blocks: a run at {} {} {} names palette entry {} or filter {:?}, past the end; left out",
                 self.id,
@@ -996,6 +1028,39 @@ impl world::Host for State {
     }
     fn poll_surface_heights(&mut self) -> Vec<SurfaceHeights> {
         std::mem::take(&mut self.surface)
+    }
+    fn read_columns(
+        &mut self,
+        tag: u32,
+        columns: Vec<(i32, i32)>,
+        heightmap: Heightmap,
+        below: u32,
+        above: u32,
+    ) {
+        let per = u64::from(below) + u64::from(above);
+        if columns.len() > COLUMNS_MAX
+            || per > u64::from(COLUMN_BLOCKS)
+            || columns.len() as u64 * per > COLUMNS_BLOCKS_MAX as u64
+        {
+            log::warn!(
+                "[mod {}] read-columns over {COLUMNS_MAX} columns, {COLUMN_BLOCKS} blocks a column or \
+                 {COLUMNS_BLOCKS_MAX} blocks; left out",
+                self.id
+            );
+            return;
+        }
+        let id = self.id.clone();
+        self.out.push(Output::Columns {
+            id,
+            tag,
+            columns,
+            heightmap,
+            below,
+            above,
+        });
+    }
+    fn poll_columns(&mut self) -> Vec<ColumnBlocks> {
+        std::mem::take(&mut self.columns)
     }
     fn set_flying_speed(&mut self, speed: Option<f32>) {
         self.flying_speed = speed

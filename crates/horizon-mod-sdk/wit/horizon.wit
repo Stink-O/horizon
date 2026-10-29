@@ -331,6 +331,32 @@ interface %world {
     /// The answers to `surface-height` queries that came back since the
     /// last call, oldest first.
     poll-surface-heights: func() -> list<surface-heights>;
+    /// The answer to a `read-columns` query: its `tag`; the names of the
+    /// blocks it saw (`minecraft:snow`, without their properties), which
+    /// `blocks` index; for each of its columns, in order, the height it
+    /// counted from (as `surface-height` answers it), or none where the
+    /// column's chunk is not loaded; and each column's blocks, `below` +
+    /// `above` of them a column, bottom first: from `below` under that
+    /// height up to `above` - 1 over it (a column that is not loaded, and
+    /// what is outside the world's height, reads as air).
+    record column-blocks {
+        tag: u32,
+        palette: list<string>,
+        bases: list<option<s32>>,
+        blocks: list<u16>,
+    }
+    /// Asks the world for the blocks of each of `columns` (x, z) round its
+    /// height on `heightmap`: `below` blocks under it and `above` from it
+    /// up. Read and answered as `surface-height` is, in order with
+    /// `run-commands` and `edit-blocks`, through `poll-columns` with the
+    /// `tag` given here, a tick or two later in single player. At most
+    /// 65,536 columns, 64 blocks a column and 1,048,576 blocks a call; a
+    /// query with more is left out (logged). On a remote server every
+    /// column is none, answered at once.
+    read-columns: func(tag: u32, columns: list<tuple<s32, s32>>, heightmap: heightmap, below: u32, above: u32);
+    /// The answers to `read-columns` queries that came back since the last
+    /// call, oldest first.
+    poll-columns: func() -> list<column-blocks>;
 }
 
 /// What the game calls. Only the hooks `init` asks for are ever called.

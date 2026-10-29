@@ -5,7 +5,8 @@
 //! <speed>|none` sets the flying speed, `/screen` opens an empty screen and
 //! `/typed` chats what was typed on it, `/surface <tag>` asks for the heights
 //! of columns (1, 2) and (-3, 40), `/heights` chats the answers come back,
-//! `/data <n>` gives a post pass the words 0..n; `tick` and `frame` do
+//! `/data <n>` gives a post pass the words 0..n, `/columns <tag> <n> <below>
+//! <above>` asks for the blocks of n columns, `/blocks` chats the answers; `tick` and `frame` do
 //! nothing, to measure the cost of a call.
 use horizon_mod_sdk::{Mod, Registration, chat, input, render, storage, ui, world};
 
@@ -17,7 +18,7 @@ impl Mod for Guest {
     fn init() -> Result<(Self, Registration), String> {
         let hooks = [
             "spin", "panic", "grow", "hello", "save", "load", "save_key", "fly", "screen", "typed",
-            "surface", "heights", "data",
+            "surface", "heights", "data", "columns", "blocks",
         ]
         .into_iter()
         .fold(Registration::new(), Registration::command)
@@ -93,6 +94,28 @@ impl Mod for Guest {
                             .map(|h| h.map_or("none".into(), |y| y.to_string()))
                             .collect();
                         format!("{}: {}", a.tag, hs.join(" "))
+                    })
+                    .collect();
+                chat::show(&answers.join(", "));
+                Ok(None)
+            }
+            "columns" => {
+                let n: Vec<u32> = args.split(' ').filter_map(|w| w.parse().ok()).collect();
+                let [tag, count, below, above] = n[..] else {
+                    return Err("Usage: /columns <tag> <n> <below> <above>".into());
+                };
+                let cols: Vec<(i32, i32)> = (0..count as i32).map(|i| (i, -i)).collect();
+                world::read_columns(tag, &cols, world::Heightmap::MotionBlockingNoLeaves, below, above);
+                Ok(None)
+            }
+            "blocks" => {
+                let answers: Vec<String> = world::poll_columns()
+                    .into_iter()
+                    .map(|a| {
+                        let bases: Vec<String> =
+                            a.bases.iter().map(|h| h.map_or("none".into(), |y| y.to_string())).collect();
+                        let blocks: Vec<&str> = a.blocks.iter().map(|&b| a.palette[b as usize].as_str()).collect();
+                        format!("{}: {} | {}", a.tag, bases.join(" "), blocks.join(" "))
                     })
                     .collect();
                 chat::show(&answers.join(", "));
