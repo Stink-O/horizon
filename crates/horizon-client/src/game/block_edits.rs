@@ -168,7 +168,17 @@ impl Game<'_> {
             })
         };
         let top = MIN_Y + horizon_client::chunk::HEIGHT - 1;
+        let biomes = self.res.biomes();
+        let mut tints = Vec::with_capacity(columns.len() * 3);
         for (&(x, z), base) in columns.iter().zip(&bases) {
+            // (the biome tints at the column's top, as the block there is tinted)
+            match base.and_then(|b| self.world.chunks.get(&(x >> 4, z >> 4)).map(|c| c.biome(x, b - 1, z))) {
+                Some(id) => {
+                    let b = biomes.get(id);
+                    tints.extend([biomes.grass(id, f64::from(x), f64::from(z)), b.foliage, b.water]);
+                }
+                None => tints.extend([0, 0, 0]),
+            }
             match base {
                 Some(b) => {
                     let y0 = b - below as i32;
@@ -192,6 +202,7 @@ impl Game<'_> {
             palette,
             bases,
             blocks,
+            tints,
         }
     }
 

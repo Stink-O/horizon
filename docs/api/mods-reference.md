@@ -298,7 +298,7 @@ The answer to a `surface-height` query: its `tag`, and for each of its columns, 
 
 ### record `column-blocks`
 
-The answer to a `read-columns` query: its `tag`; the names of the blocks it saw (`minecraft:snow`, without their properties), which `blocks` index; for each of its columns, in order, the height it counted from (as `surface-height` answers it), or none where the column's chunk is not loaded; and each column's blocks, `below` + `above` of them a column, bottom first: from `below` under that height up to `above` - 1 over it (a column that is not loaded, and what is outside the world's height, reads as air).
+The answer to a `read-columns` query: its `tag`; the names of the blocks it saw (`minecraft:snow`, without their properties), which `blocks` index; for each of its columns, in order, the height it counted from (as `surface-height` answers it), or none where the column's chunk is not loaded; and each column's blocks, `below` + `above` of them a column, bottom first: from `below` under that height up to `above` - 1 over it (a column that is not loaded, and what is outside the world's height, reads as air); and each column's biome tints, three a column: the grass's, the foliage's and the water's colour there (0xRRGGBB, as the game tints its blocks; 0 where the column is not loaded).
 
 | Field | Type | |
 | --- | --- | --- |
@@ -306,6 +306,7 @@ The answer to a `read-columns` query: its `tag`; the names of the blocks it saw 
 | `palette` | `list<string>` |  |
 | `bases` | `list<option<s32>>` |  |
 | `blocks` | `list<u16>` |  |
+| `tints` | `list<u32>` |  |
 
 | Function | Signature | What it does |
 | --- | --- | --- |

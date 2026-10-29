@@ -115,7 +115,8 @@ impl Mod for Guest {
                         let bases: Vec<String> =
                             a.bases.iter().map(|h| h.map_or("none".into(), |y| y.to_string())).collect();
                         let blocks: Vec<&str> = a.blocks.iter().map(|&b| a.palette[b as usize].as_str()).collect();
-                        format!("{}: {} | {}", a.tag, bases.join(" "), blocks.join(" "))
+                        let tints: Vec<String> = a.tints.iter().map(|t| format!("{t:06x}")).collect();
+                        format!("{}: {} | {} | {}", a.tag, bases.join(" "), blocks.join(" "), tints.join(" "))
                     })
                     .collect();
                 chat::show(&answers.join(", "));

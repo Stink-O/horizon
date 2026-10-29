@@ -290,13 +290,14 @@ fn columns_are_asked_answered_and_capped() {
             ],
             bases: vec![Some(70), None],
             blocks: vec![0, 2, 1, 1, 1, 1],
+            tints: vec![0x91BD59, 0x77AB2F, 0x3F76E4, 0, 0, 0],
         },
     );
     mods.command("blocks");
     assert_eq!(
         chat(&mut mods).as_deref(),
         Some(
-            "3: 70 none | minecraft:stone minecraft:snow minecraft:air minecraft:air minecraft:air minecraft:air"
+            "3: 70 none | minecraft:stone minecraft:snow minecraft:air minecraft:air minecraft:air minecraft:air | 91bd59 77ab2f 3f76e4 000000 000000 000000"
         )
     );
     mods.command("blocks");

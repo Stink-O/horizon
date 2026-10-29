@@ -947,6 +947,7 @@ impl Game<'_> {
                 palette: Vec::new(),
                 bases: vec![None; columns.len()],
                 blocks: vec![0; columns.len() * (span.0 + span.1) as usize],
+                tints: vec![0; columns.len() * 3],
             });
             return;
         }
