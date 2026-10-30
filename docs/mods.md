@@ -136,6 +136,31 @@ The view bobbing, hurt tilt and camera shake are in `view` and `camera_position`
 pixel meets what the world drew there. The pass runs over the world's own target (the world then always renders to
 one), and what it returns is what a shader pack's post-processing or the copy to the screen takes.
 
+#### A half-size stage
+
+An expensive pass (a ray-marched volume: smoke, clouds, fog) can draw its costly part at a quarter of the pixels. Besides
+`fs_main`, the pass defines `@fragment fn fs_half(in: StageIn)` and `@fragment fn fs_join(in: StageIn) -> @location(0)
+vec4<f32>`, and declares the half-size pictures itself:
+
+```wgsl
+@group(0) @binding(6) var half_picture: texture_2d<f32>;
+@group(0) @binding(7) var half_extra: texture_2d<f32>;
+```
+
+The game then draws `fs_half` into RGBA16F pictures half the world's width and height (rounded up: half pixel `x, y`
+stands for the world's `2x, 2y` to `2x+1, 2y+1`): `half_picture` from its `@location(0)` and, if it returns a struct
+with a `@location(1)` too, `half_extra` (for what the join needs besides colour: the depth the stage drew at, say).
+Then it draws `fs_join` over the world in place of `fs_main`, with the same bindings and both pictures. `frame` is the
+same in both stages (`resolution` is the world's picture's; `in.position` is in the stage's own pixels). `fs_half`
+may not read the pictures. A typical stage keeps premultiplied colour and transmittance, marched to a depth taken
+from each two by two of `scene_depth` (alternately the nearest and the farthest, so both sides of an edge are kept),
+and the join weighs the four nearest half pixels by how close their depth is to its own pixel's (a joint bilateral
+upsample), so edges against blocks and the sky stay sharp.
+
+Because the declarations are the pass's own, the same source compiles on a game without the stages (it draws
+`fs_main` alone, at full size), and a mod needs no new import to use them: `fs_main` is the whole pass at full size
+for that case. A pass with only one of `fs_half` and `fs_join` does not compile.
+
 ### Planned interfaces
 
 Each is a new capability, added in a 0.x minor version so older mods keep

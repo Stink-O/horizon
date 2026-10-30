@@ -228,7 +228,7 @@ Capability `render`: a post-processing pass the mod supplies, drawn over the wor
 
 | Function | Signature | What it does |
 | --- | --- | --- |
-| `set-post` | `func(wgsl: string)` | The pass: a WGSL fragment shader with an `fs_main` entry, after the mod pass prelude (docs/mods.md, "A mod's post pass": the world's colour and depth, a `Frame` uniform and helpers). Compiled once per distinct source; an error is logged and the pass skipped. |
+| `set-post` | `func(wgsl: string)` | The pass: a WGSL fragment shader with an `fs_main` entry, after the mod pass prelude (docs/mods.md, "A mod's post pass": the world's colour and depth, a `Frame` uniform and helpers). Compiled once per distinct source; an error is logged and the pass skipped. A pass may also draw its costly part at half size: `fs_half` and `fs_join` beside `fs_main` (docs/mods.md, "A half-size stage"). |
 | `set-params` | `func(params: list<f32>)` | Sixteen floats the pass reads as `frame.mod_params[0..4]`, kept until changed. The pass runs only while some are set. |
 | `clear-post` | `func()` | Stops the pass: no source, no parameters and no data until the next `set-post` and `set-params`. |
 | `set-data` | `func(words: list<u32>)` | Words the pass reads as `mod_data` (`var<storage, read> mod_data: array<u32>`, binding 5 of the prelude; `bitcast<f32>` for floats), kept until changed or the pass is cleared. Until some are set it holds one word, 0: read `arrayLength(&mod_data)` before indexing. Uploaded to the GPU only when they change. At most 262,144 words (1 MiB) a call; more are ignored (logged). |

@@ -201,7 +201,9 @@ interface render {
     /// The pass: a WGSL fragment shader with an `fs_main` entry, after the
     /// mod pass prelude (docs/mods.md, "A mod's post pass": the world's
     /// colour and depth, a `Frame` uniform and helpers). Compiled once per
-    /// distinct source; an error is logged and the pass skipped.
+    /// distinct source; an error is logged and the pass skipped. A pass may
+    /// also draw its costly part at half size: `fs_half` and `fs_join`
+    /// beside `fs_main` (docs/mods.md, "A half-size stage").
     set-post: func(wgsl: string);
     /// Sixteen floats the pass reads as `frame.mod_params[0..4]`, kept until
     /// changed. The pass runs only while some are set.
