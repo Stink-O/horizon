@@ -38,6 +38,8 @@ const FUEL_INIT: u64 = 2_000_000_000;
 const FUEL_TICK: u64 = 50_000_000;
 const FUEL_FRAME: u64 = 10_000_000;
 const FUEL_EVENT: u64 = 100_000_000;
+/// A call that uses this fraction of its fuel or more (1/2) is logged: a mod near being stopped.
+const FUEL_WARN: u64 = 2;
 /// Chat lines a mod may show per call, HUD lines and their length.
 const CHAT_PER_CALL: usize = 8;
 const HUD_LINES: usize = 16;
@@ -193,6 +195,11 @@ pub struct Entry {
     pub status: Status,
     /// The mod's average time per call of its busiest hook.
     pub cost: Duration,
+    /// The most fuel one call has used, the hook it was (`tick`, `frame`, `command /name`, ...), and that hook's
+    /// fuel limit: how near the mod has come to being stopped for taking too long.
+    pub fuel_peak: (u64, &'static str, u64),
+    /// The fuel its last call used.
+    pub fuel_last: u64,
     run: Option<Running>,
     modified: Option<SystemTime>,
 }
@@ -237,6 +244,12 @@ struct State {
     columns: Vec<ColumnBlocks>,
     /// Capability `world`: the flying speed it wants the player to have.
     flying_speed: Option<f32>,
+    /// Feature `fuel-trace` (the soak harness): the call's fuel, and what was left of it as the mod last called the
+    /// game; a log line from the mod starting `fuel:` says how much the call had used by then.
+    #[cfg(feature = "fuel-trace")]
+    fuel_call: u64,
+    #[cfg(feature = "fuel-trace")]
+    fuel_now: u64,
 }
 
 /// The installed mods and the engine running them. `Mods::default()` is
@@ -268,6 +281,8 @@ impl Mods {
                 manifest: None,
                 status: Status::Off,
                 cost: Duration::ZERO,
+                fuel_peak: (0, "", 0),
+                fuel_last: 0,
                 run: None,
                 modified,
             };
@@ -302,7 +317,10 @@ impl Mods {
     fn engine(&mut self) -> Result<&(Engine, Linker<State>), String> {
         if self.engine.is_none() {
             let mut config = Config::new();
-            config.wasm_component_model(true).consume_fuel(true);
+            config
+                .wasm_component_model(true)
+                .consume_fuel(true)
+                .wasm_backtrace(true);
             let engine = Engine::new(&config).map_err(|e| e.to_string())?;
             let mut linker = Linker::new(&engine);
             HorizonMod::add_to_linker::<State, HasSelf<State>>(&mut linker, |s| s)
@@ -383,9 +401,21 @@ impl Mods {
             surface: Vec::new(),
             columns: Vec::new(),
             flying_speed: None,
+            #[cfg(feature = "fuel-trace")]
+            fuel_call: FUEL_INIT,
+            #[cfg(feature = "fuel-trace")]
+            fuel_now: FUEL_INIT,
         };
         let mut store = Store::new(engine, state);
         store.limiter(|s| &mut s.limits);
+        #[cfg(feature = "fuel-trace")]
+        store.call_hook(|mut ctx, hook| {
+            if matches!(hook, wasmtime::CallHook::CallingHost) {
+                let f = ctx.get_fuel().unwrap_or(0);
+                ctx.data_mut().fuel_now = f;
+            }
+            Ok(())
+        });
         store.set_fuel(FUEL_INIT).map_err(|e| e.to_string())?;
         let exports =
             HorizonMod::instantiate(&mut store, &component, linker).map_err(|e| reason(&e))?;
@@ -423,6 +453,7 @@ impl Mods {
     /// Calls `f` on every running mod whose hooks `wants`, with `fuel`.
     fn each(
         &mut self,
+        hook: &'static str,
         fuel: u64,
         wants: impl Fn(&Registration) -> bool,
         mut f: impl FnMut(&HorizonMod, &mut Store<State>) -> wasmtime::Result<()>,
@@ -433,7 +464,7 @@ impl Mods {
                 .as_ref()
                 .is_some_and(|r| wants(&r.hooks))
             {
-                self.call(i, fuel, &mut f);
+                self.call(i, hook, fuel, &mut f);
             }
         }
     }
@@ -442,6 +473,7 @@ impl Mods {
     fn call<R>(
         &mut self,
         i: usize,
+        hook: &'static str,
         fuel: u64,
         f: impl FnOnce(&HorizonMod, &mut Store<State>) -> wasmtime::Result<R>,
     ) -> Option<R> {
@@ -455,18 +487,46 @@ impl Mods {
             .filter(|_| screen_open)
             .map(|(x, y)| Point { x, y });
         let started = Instant::now();
+        #[cfg(feature = "fuel-trace")]
+        {
+            run.store.data_mut().fuel_call = fuel;
+        }
         let result = run
             .store
             .set_fuel(fuel)
             .and_then(|()| f(&run.exports, &mut run.store));
         // An average over about the last 64 calls.
         entry.cost = (entry.cost * 63 + started.elapsed()) / 64;
+        // (fuel used: all of it when it ran out)
+        let used = fuel.saturating_sub(run.store.get_fuel().unwrap_or(0));
+        entry.fuel_last = used;
+        if used > entry.fuel_peak.0 {
+            entry.fuel_peak = (used, hook, fuel);
+        }
+        if used >= fuel / FUEL_WARN && result.is_ok() {
+            log::warn!(
+                "Horizon: mod {}'s {hook} used {:.1}M of its {:.0}M fuel ({:.0}%, {:.1} ms)",
+                run.store.data().id,
+                used as f64 / 1e6,
+                fuel as f64 / 1e6,
+                used as f64 * 100.0 / fuel as f64,
+                started.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
         self.out.append(&mut run.store.data_mut().out);
         match result {
             Ok(r) => Some(r),
             Err(e) => {
                 let reason = reason(&e);
                 log::warn!("Horizon: mod {} stopped: {reason}", run.store.data().id);
+                // (where: the hook, and the mod's functions on the stack when it stopped, innermost first)
+                log::warn!(
+                    "Horizon: mod {} stopped in its {hook} ({:.1}M fuel used, {:.1} ms){}",
+                    run.store.data().id,
+                    used as f64 / 1e6,
+                    started.elapsed().as_secs_f64() * 1000.0,
+                    backtrace(&e),
+                );
                 let name = run.store.data().name.clone();
                 self.out.push(Output::Stopped {
                     name,
@@ -482,6 +542,7 @@ impl Mods {
     /// A game tick.
     pub fn tick(&mut self, tick: u64) {
         self.each(
+            "tick",
             FUEL_TICK,
             |h| h.tick,
             |m, s| m.horizon_mods_events().call_tick(s, tick),
@@ -490,6 +551,7 @@ impl Mods {
     /// A rendered frame, `seconds` after the last.
     pub fn frame(&mut self, seconds: f32) {
         self.each(
+            "frame",
             FUEL_FRAME,
             |h| h.frame,
             |m, s| m.horizon_mods_events().call_frame(s, seconds),
@@ -498,6 +560,7 @@ impl Mods {
     /// A chat line the player received, as plain text.
     pub fn chat(&mut self, text: &str) {
         self.each(
+            "chat",
             FUEL_EVENT,
             |h| h.chat,
             |m, s| m.horizon_mods_events().call_chat(s, text),
@@ -521,7 +584,7 @@ impl Mods {
         let Some(i) = self.command_owner(name) else {
             return false;
         };
-        let result = self.call(i, FUEL_EVENT, |m, s| {
+        let result = self.call(i, "command", FUEL_EVENT, |m, s| {
             m.horizon_mods_events().call_command(s, name, args)
         });
         match result {
@@ -714,6 +777,24 @@ fn modified(path: &Path) -> Option<SystemTime> {
     meta.modified().ok()
 }
 
+/// The mod's functions on the stack when `e` was raised, innermost first (their names, when the mod keeps its name
+/// section), as one log line's tail.
+fn backtrace(e: &wasmtime::Error) -> String {
+    let Some(bt) = e.downcast_ref::<wasmtime::WasmBacktrace>() else {
+        return String::new();
+    };
+    let frames: Vec<String> = bt
+        .frames()
+        .iter()
+        .take(24)
+        .map(|f| match f.func_name() {
+            Some(n) => n.to_string(),
+            None => format!("#{}", f.func_index()),
+        })
+        .collect();
+    format!(": {}", frames.join(" < "))
+}
+
 /// A trap or error, as the player reads it.
 fn reason(e: &wasmtime::Error) -> String {
     match e.downcast_ref::<Trap>() {
@@ -739,6 +820,18 @@ impl mod_log::Host for State {
             mod_log::Level::Warn => log::Level::Warn,
             mod_log::Level::Error => log::Level::Error,
         };
+        #[cfg(feature = "fuel-trace")]
+        if message.starts_with("fuel:") {
+            let used = self.fuel_call.saturating_sub(self.fuel_now);
+            log::log!(
+                level,
+                "[mod {}] {} @ {:.2}M",
+                self.id,
+                clip(message),
+                used as f64 / 1e6
+            );
+            return;
+        }
         log::log!(level, "[mod {}] {}", self.id, clip(message));
     }
 }
