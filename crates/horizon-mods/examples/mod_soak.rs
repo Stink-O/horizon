@@ -8,7 +8,11 @@
 //! at the same spot, stopped part way through and fired again at once, with the frames now quick and now slow and the
 //! world's answers to its reads arriving at once, late, or many together. The world is a block store the mod's edits
 //! and fills change, so the later strikes land on the craters (and the aquifers and lava they open) of the earlier.
-//! Prints each hook's worst call; exits 1 if the mod stopped, or a call used over `--max` (percent) of its fuel.
+//! As in the game, only the land round the player and the chunks forceloaded a while (as they are generated) is loaded:
+//! a read of any other column answers nothing for it. Now and then the next strike is at a fresh spot far away, with
+//! the player near it or some hundreds of blocks off, so a strike's reads come back mostly unloaded at first.
+//! Prints each hook's worst call; exits 1 if the mod stopped, or any call used over `SOAK_MAX` (percent, default 50)
+//! of its fuel.
 //! Copy the mod somewhere first: its `storage` is kept beside it.
 use horizon_mods::{
     BlockEdit, Clock, ColumnBlocks, Heightmap, HeldItem, Hit, InputEvent, ItemUse, Mods, Output,
@@ -39,6 +43,13 @@ struct World {
     names: Vec<String>,
     ids: HashMap<String, u8>,
     cols: HashMap<(i32, i32), Box<[u8; H]>>,
+    /// The chunks forceloaded, and the tick each is loaded from (generated a while after it is asked for).
+    forced: HashMap<(i32, i32), u64>,
+    /// The player's chunk and how many chunks round it are loaded; the tick now.
+    view: ((i32, i32), i32),
+    now: u64,
+    /// How slowly forceloaded chunks arrive (times the usual lag; 0: never, as land in the far terrain's LOD may not).
+    slow: u64,
 }
 fn hash(x: i32, z: i32, k: u32) -> f64 {
     let mut h = (x as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
@@ -55,6 +66,10 @@ impl World {
             names: Vec::new(),
             ids: HashMap::new(),
             cols: HashMap::new(),
+            forced: HashMap::new(),
+            view: ((0, 0), 10),
+            now: 0,
+            slow: 1,
         };
         w.id("minecraft:air");
         w
@@ -150,6 +165,13 @@ impl World {
         }
         c
     }
+    /// Whether column (x, z) is loaded: round the player, or forceloaded long enough ago to be generated.
+    fn loaded(&self, x: i32, z: i32) -> bool {
+        let (cx, cz) = (x >> 4, z >> 4);
+        let ((px, pz), v) = self.view;
+        (cx - px).abs() <= v && (cz - pz).abs() <= v
+            || self.forced.get(&(cx, cz)).is_some_and(|&t| t <= self.now)
+    }
     fn is(&self, b: u8, what: &str) -> bool {
         self.names.get(b as usize).is_some_and(|n| n.contains(what))
     }
@@ -213,6 +235,26 @@ impl World {
     /// `fill x0 y0 z0 x1 y1 z1 block [replace filter]` (relative coordinates and other commands left alone).
     fn command(&mut self, c: &str) -> bool {
         let w: Vec<&str> = c.split_whitespace().collect();
+        if w.first() == Some(&"forceload") && w.len() >= 4 {
+            let n: Vec<i32> = w[2..].iter().filter_map(|s| s.parse().ok()).collect();
+            let (x0, z0) = (n[0], n[1]);
+            let (x1, z1) = if n.len() >= 4 { (n[2], n[3]) } else { (x0, z0) };
+            for cx in (x0.min(x1) >> 4)..=(x0.max(x1) >> 4) {
+                for cz in (z0.min(z1) >> 4)..=(z0.max(z1) >> 4) {
+                    if w[1] == "add" {
+                        // (generated some ticks to some seconds after: the nearer the middle of the batch, the sooner)
+                        let lag = (10 + (hash(cx, cz, 9) * 140.0) as u64)
+                            .checked_mul(self.slow)
+                            .filter(|_| self.slow > 0)
+                            .unwrap_or(u64::MAX - self.now);
+                        self.forced.entry((cx, cz)).or_insert(self.now + lag);
+                    } else if w[1] == "remove" {
+                        self.forced.remove(&(cx, cz));
+                    }
+                }
+            }
+            return true;
+        }
         if w.first() != Some(&"fill") || w.len() < 8 {
             return false;
         }
@@ -250,6 +292,11 @@ impl World {
         let mut bases = Vec::with_capacity(columns.len());
         let mut blocks = Vec::with_capacity(columns.len() * per);
         for &(x, z) in columns {
+            if !self.loaded(x, z) {
+                bases.push(None);
+                blocks.extend(std::iter::repeat_n(0, per));
+                continue;
+            }
             let base = self.height(x, z, h);
             bases.push(Some(base));
             let c = *self.col(x, z);
@@ -308,11 +355,15 @@ struct Soak {
     frame_s: f32,
     frames: u32,
     target: (i32, i32),
+    /// The player's place from the target (blocks east, south).
+    me: (i32, i32),
     /// Per hook: the most fuel a call used, and the limit.
     worst: HashMap<&'static str, (u64, u64)>,
     stopped: Option<String>,
     strikes: u32,
     stops: u32,
+    /// The spot the strikes are round (moved far off for a fresh one).
+    home: (i32, i32),
     /// Edits made, runs in them, reads answered, commands run.
     counts: [u64; 4],
     /// The tick the last strike fired on, reads answered this tick, and the percentage of a hook's fuel over which a
@@ -320,6 +371,9 @@ struct Soak {
     fired: u64,
     answered: u32,
     report: u64,
+    /// The percentage of its fuel over which a call fails the soak, and the calls that went over it.
+    max_pct: f64,
+    over: Vec<String>,
     log: Vec<String>,
 }
 
@@ -333,9 +387,9 @@ impl Soak {
         let block = self.world.names[b as usize].clone();
         Snapshot {
             player: Some(Player {
-                x: f64::from(tx) + 0.5,
+                x: f64::from(tx + self.me.0) + 0.5,
                 y: f64::from(ty) + 40.0,
-                z: f64::from(tz) + 150.5,
+                z: f64::from(tz + self.me.1) + 0.5,
                 yaw: 180.0,
                 pitch: 15.0,
                 health: 20.0,
@@ -354,7 +408,7 @@ impl Soak {
                 custom_data: None,
             }),
             view_hit: Some((
-                150.0,
+                (self.me.0 as f32).hypot(self.me.1 as f32),
                 Hit {
                     block_x: tx,
                     block_y: ty - 1,
@@ -372,6 +426,15 @@ impl Soak {
         let used = e.fuel_last;
         let before = self.counts;
         let heavy = used * 100 > limit * self.report;
+        if used as f64 * 100.0 > limit as f64 * self.max_pct {
+            self.over.push(format!(
+                "{hook} {:.1}M ({:.0}%) {:.2} s after the fire ({})",
+                used as f64 / 1e6,
+                used as f64 * 100.0 / limit as f64,
+                (self.tick.saturating_sub(self.fired)) as f64 * 0.05,
+                self.log.join("; ")
+            ));
+        }
         let w = self.worst.entry(hook).or_insert((0, limit));
         w.0 = w.0.max(used);
         if e.status != Status::Running && self.stopped.is_none() {
@@ -432,7 +495,7 @@ impl Soak {
             eprintln!(
                 "  heavy {hook}: {:.1}M, {:.2} s after the fire, {} edits ({} runs), {} cmds; {} reads answered before it",
                 used as f64 / 1e6,
-                (self.tick - self.fired) as f64 * 0.05,
+                (self.tick.saturating_sub(self.fired)) as f64 * 0.05,
                 d[0],
                 d[1],
                 d[3],
@@ -461,7 +524,7 @@ impl Soak {
                 Ask::Surface(tag, columns, h) => {
                     let heights = columns
                         .iter()
-                        .map(|&(x, z)| Some(self.world.height(x, z, h)))
+                        .map(|&(x, z)| self.world.loaded(x, z).then(|| self.world.height(x, z, h)))
                         .collect();
                     self.mods
                         .push_surface("orbital", SurfaceHeights { tag, heights });
@@ -477,6 +540,9 @@ impl Soak {
     }
     fn step(&mut self) {
         self.tick += 1;
+        self.world.now = self.tick;
+        let (tx, tz) = self.target;
+        self.world.view.0 = ((tx + self.me.0) >> 4, (tz + self.me.1) >> 4);
         self.answer();
         let snap = self.snapshot();
         self.mods.set_snapshot(snap);
@@ -582,10 +648,12 @@ fn main() {
         frame_s: 0.016,
         frames: 3,
         target: (497_062, 498_935),
+        me: (0, 150),
         worst: HashMap::new(),
         stopped: None,
         strikes: 0,
         stops: 0,
+        home: (497_062, 498_935),
         counts: [0; 4],
         fired: 0,
         answered: 0,
@@ -593,6 +661,8 @@ fn main() {
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(40),
+        max_pct,
+        over: Vec::new(),
         log: Vec::new(),
     };
     let terrain = std::env::var("SOAK_TERRAIN").unwrap_or_else(|_| "on".into());
@@ -621,13 +691,41 @@ fn main() {
         s.log.clear();
         let laser = lasers[s.rng.below(lasers.len() as u64) as usize].clone();
         s.command(&format!("orbital {laser}"));
-        // (at and round the same spot, now and then further off)
-        let (bx, bz) = (497_062, 498_935);
-        let off = if s.rng.below(4) == 0 { 120 } else { 24 };
+        // (at and round the same spot, now and then further off; or at a fresh spot far away, never loaded, the
+        // player flown there or some hundreds of blocks off it, the land round them all that is loaded)
+        let far = s.rng.below(3) == 0;
+        if far {
+            let a = s.rng.below(360) as f64 * std::f64::consts::PI / 180.0;
+            let d = 2000.0 + s.rng.below(6000) as f64;
+            s.home = (
+                s.home.0 + (a.cos() * d) as i32,
+                s.home.1 + (a.sin() * d) as i32,
+            );
+            s.world.view.1 = [6, 8, 10, 12][s.rng.below(4) as usize];
+        }
+        // (the forceloaded chunks generated as usual, slowly, or never while the strike lasts)
+        s.world.slow = [1, 1, 4, 20, 0][s.rng.below(5) as usize];
+        let (bx, bz) = s.home;
+        let off = if far { 0 } else if s.rng.below(4) == 0 { 120 } else { 24 };
         s.target = (
             bx + s.rng.below(2 * off + 1) as i32 - off as i32,
             bz + s.rng.below(2 * off + 1) as i32 - off as i32,
         );
+        // (called in from close by, from some hundreds of blocks, or from far off near the designator's 1000-block reach)
+        s.me = match s.rng.below(4) {
+            0 => (0, 150),
+            1 => (0, 380 + s.rng.below(200) as i32),
+            2 => (s.rng.below(400) as i32 - 200, 240 + s.rng.below(300) as i32),
+            _ => {
+                let a = s.rng.below(360) as f64 * std::f64::consts::PI / 180.0;
+                let d = 500.0 + s.rng.below(500) as f64;
+                ((a.cos() * d) as i32, (a.sin() * d) as i32)
+            }
+        };
+        // (the land round them loaded before the fire: the player is there a few ticks first)
+        for _ in 0..4 {
+            s.step();
+        }
         s.answers = match s.rng.below(4) {
             0 => Answers::Next,
             1 => Answers::Late(10),
@@ -637,16 +735,19 @@ fn main() {
         s.fire();
         // stopped soon, late, or not at all (and then fired again at once)
         let full = std::env::var_os("SOAK_FULL").is_some();
-        let ticks = match if full { 4 } else { s.rng.below(5) } {
+        // (and, often, early: in the land read's first seconds, or round the burst at 11 s and its first seconds)
+        let ticks = match if full { 6 } else { s.rng.below(7) } {
             0 => 1 + s.rng.below(20) as u32,
             1 => 20 + s.rng.below(200) as u32,
             2 => 200 + s.rng.below(600) as u32,
             3 => 30 + s.rng.below(60) as u32,
+            4 => 210 + s.rng.below(100) as u32,
+            5 => 2 + s.rng.below(60) as u32,
             _ => 2200,
         };
         s.log.push(format!(
-            "#{n} {laser} at {:?} answers {:?}, {ticks} ticks",
-            s.target, s.answers
+            "#{n} {laser} at {:?} from {:?} answers {:?} forceload x{}, {ticks} ticks",
+            s.target, s.me, s.answers, s.world.slow
         ));
         s.run(ticks);
         if ticks < 2200 {
@@ -676,7 +777,13 @@ fn main() {
         "{} strikes, {} stopped part way, {} ticks",
         s.strikes, s.stops, s.tick
     );
-    let mut bad = s.stopped.is_some();
+    let mut bad = s.stopped.is_some() || !s.over.is_empty();
+    for o in s.over.iter().take(20) {
+        println!("OVER {max_pct:.0}%: {o}");
+    }
+    if s.over.len() > 20 {
+        println!("... and {} more calls over {max_pct:.0}%", s.over.len() - 20);
+    }
     for (hook, (used, limit)) in &s.worst {
         let pct = *used as f64 * 100.0 / *limit as f64;
         println!(
