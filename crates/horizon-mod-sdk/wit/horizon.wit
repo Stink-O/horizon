@@ -257,6 +257,12 @@ interface %world {
     /// is not a number) puts vanilla's back. A spectator keeps the scroll
     /// wheel's speed. On a remote server it is ignored and logged.
     set-flying-speed: func(speed: option<f32>);
+    /// Adds to the local player's velocity, in blocks a tick (`x`, `y`,
+    /// `z`), as an explosion's knockback does: the player is thrown and
+    /// falls back under gravity, flying or not, colliding as they move.
+    /// Each component is clamped to -4..4 a call; a spectator, or a value
+    /// that is not a number, is left alone.
+    push-player: func(x: f32, y: f32, z: f32);
     /// Which of a column's heights a run's `y` counts from (vanilla's
     /// heightmaps): one above the highest block that is not air, that blocks
     /// motion or holds a fluid, that does so and is not leaves, or that is

@@ -146,6 +146,8 @@ pub enum Output {
     },
     /// `render.shake`: a jolt of the camera, `strength` 0 to 1, fading out over `seconds`.
     Shake { strength: f32, seconds: f32 },
+    /// `world.push-player`: added to the local player's velocity, blocks a tick.
+    Push { velocity: [f32; 3] },
 }
 
 /// A keybind a mod registered (capability `input`).
@@ -1154,6 +1156,13 @@ impl world::Host for State {
     }
     fn poll_columns(&mut self) -> Vec<ColumnBlocks> {
         std::mem::take(&mut self.columns)
+    }
+    fn push_player(&mut self, x: f32, y: f32, z: f32) {
+        if x.is_finite() && y.is_finite() && z.is_finite() {
+            self.out.push(Output::Push {
+                velocity: [x.clamp(-4.0, 4.0), y.clamp(-4.0, 4.0), z.clamp(-4.0, 4.0)],
+            });
+        }
     }
     fn set_flying_speed(&mut self, speed: Option<f32>) {
         self.flying_speed = speed

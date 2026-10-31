@@ -589,6 +589,19 @@ impl Game<'_> {
                     self.camera_shake.add(now, strength, seconds);
                     continue;
                 }
+                // (the window's player moves itself, as vanilla's client does: an explosion's knockback is added
+                // to its motion here too)
+                Output::Push { velocity: [x, y, z] } => {
+                    if let Some(p) = self.player.as_mut()
+                        && !p.spectator
+                    {
+                        p.velocity = horizon_core::geometry::Vec3::new(p.velocity.x + f64::from(x), p.velocity.y + f64::from(y), p.velocity.z + f64::from(z));
+                        if y > 0.0 {
+                            p.ground.on_ground = false;
+                        }
+                    }
+                    continue;
+                }
                 Output::Chat { name, text } => {
                     let mut line = Text::literal(format!("[{name}] ")).with_color(text::GRAY);
                     line.push(Text::literal(text));

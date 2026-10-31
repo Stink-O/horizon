@@ -227,6 +227,10 @@ fn play(path: &Path, report: &mut Report) -> Result<(), String> {
             Output::Shake { strength, seconds } => {
                 format!("camera shake: {strength} for {seconds} s")
             }
+            Output::Push { velocity } => format!("player pushed: {velocity:?}"),
+            Output::Edit { .. } => "block edit".to_owned(),
+            Output::Surface { .. } => "surface heights asked".to_owned(),
+            Output::Columns { .. } => "columns read".to_owned(),
         });
     }
     match failed(&mods) {
