@@ -1036,8 +1036,14 @@ impl Game<'_> {
         self.apply_settings();
     }
 
-    /// LevelChunkSection data into the client's fixed -64..320 column.
-    fn remote_chunk(&self, p: &play::LevelChunkWithLight) -> std::result::Result<Chunk, String> {
+    /// LevelChunkSection data into the client's fixed -64..320 column, with
+    /// the light the packet sends when `light` (else each section's light is
+    /// left as `Section::default`'s, for the caller to fill).
+    fn remote_chunk(
+        &self,
+        p: &play::LevelChunkWithLight,
+        light: bool,
+    ) -> std::result::Result<Chunk, String> {
         let r = self.remote.as_ref().ok_or("no connection")?;
         let sections = p
             .chunk
@@ -1114,10 +1120,13 @@ impl Game<'_> {
             }
         }
         // ClientPacketListener.applyLightData: the column keeps the light
-        // the server sent; nothing is relit.
-        let (layers, above) = self.wire_light(&p.light);
-        let sky = r.dimension.has_skylight;
-        horizon_client::light::light_from_layers(&mut chunk, &layers, above, sky);
+        // the server sent; nothing is relit. (A resident column sent again
+        // keeps its own light and is relit here: see `replace_remote`.)
+        if light {
+            let (layers, above) = self.wire_light(&p.light);
+            let sky = r.dimension.has_skylight;
+            horizon_client::light::light_from_layers(&mut chunk, &layers, above, sky);
+        }
         Ok(chunk)
     }
     /// `ClientPacketListener.readSectionList`: the sky and block layers of a
@@ -1738,33 +1747,47 @@ impl Game<'_> {
                     p.z
                 );
             }
-            C::LevelChunkWithLight(p) => match self.remote_chunk(&p) {
-                Ok(chunk) => {
-                    let (x, z) = (p.x, p.z);
-                    // A column sent again while it is resident (a bulk edit): only what changed is lit and meshed again.
-                    if self.world.chunks.contains_key(&(x, z)) {
-                        self.streaming.replace_remote(&mut self.world, chunk);
-                    } else {
-                        self.streaming.insert_remote(&mut self.world, chunk);
+            C::LevelChunkWithLight(p) => {
+                // A column sent again while it is resident and lit (a bulk edit): it keeps its own light and only
+                // what changed is lit and meshed again, so the light sent is not read.
+                let resend =
+                    self.streaming.is_lit(p.x, p.z) && self.world.chunks.contains_key(&(p.x, p.z));
+                match horizon_client::spans::time("remote_chunk", || self.remote_chunk(&p, !resend))
+                {
+                    Ok(chunk) => {
+                        let (x, z) = (p.x, p.z);
+                        if resend {
+                            horizon_client::spans::time("replace_remote", || {
+                                self.streaming.replace_remote(&mut self.world, chunk)
+                            });
+                        } else {
+                            self.streaming.insert_remote(&mut self.world, chunk);
+                        }
+                        self.world
+                            .block_entities
+                            .retain(|k, _| (k.0 >> 4, k.2 >> 4) != (x, z));
+                        for info in &p.chunk.block_entities {
+                            let pos = (
+                                x * 16 + i32::from(info.packed_xz as u8 >> 4),
+                                i32::from(info.y),
+                                z * 16 + i32::from(info.packed_xz as u8 & 15),
+                            );
+                            let state = self.world.block(pos.0, pos.1, pos.2);
+                            self.sync_block_entity(pos, state);
+                            // LevelChunk.replaceWithPacketData: the block entity loads its update tag.
+                            self.remote_block_entity_data(
+                                [pos.0, pos.1, pos.2],
+                                info.kind,
+                                &info.tag,
+                            );
+                        }
                     }
-                    self.world
-                        .block_entities
-                        .retain(|k, _| (k.0 >> 4, k.2 >> 4) != (x, z));
-                    for info in &p.chunk.block_entities {
-                        let pos = (
-                            x * 16 + i32::from(info.packed_xz as u8 >> 4),
-                            i32::from(info.y),
-                            z * 16 + i32::from(info.packed_xz as u8 & 15),
-                        );
-                        let state = self.world.block(pos.0, pos.1, pos.2);
-                        self.sync_block_entity(pos, state);
-                        // LevelChunk.replaceWithPacketData: the block entity loads its update tag.
-                        self.remote_block_entity_data([pos.0, pos.1, pos.2], info.kind, &info.tag);
-                    }
+                    Err(e) => log::warn!("Horizon: chunk {} {}: {e}", p.x, p.z),
                 }
-                Err(e) => log::warn!("Horizon: chunk {} {}: {e}", p.x, p.z),
-            },
-            C::LightUpdate(p) => self.remote_light_update(&p),
+            }
+            C::LightUpdate(p) => {
+                horizon_client::spans::time("remote_light", || self.remote_light_update(&p))
+            }
             C::ForgetLevelChunk(p) => {
                 let [x, z] = p.pos;
                 self.streaming.forget(&mut self.world, x, z);
