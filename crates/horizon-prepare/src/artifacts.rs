@@ -200,8 +200,11 @@ pub(crate) fn import_manifest(lock: &Lock, minecraft: &Path) -> Result<Value, St
         let checksum = digest(&source, "sha1")?;
         if !lock.manifest_accepted(&checksum) {
             return Err(format!(
-                "{} is a {version} version file Horizon does not know yet (sha1 {checksum}); \
-                 Mojang may have republished it. Update Horizon, or report it if this is the latest release.",
+                "{} is a {version} version file Horizon does not know yet (sha1 {checksum}). \
+                 Its client and server jars are the pinned ones, so your copy is most likely fine: \
+                 Mojang has probably republished the file, and this Horizon's research-lock.json \
+                 (minecraft.accepted_manifest_sha1) is out of date. Update Horizon, or report it \
+                 if this is the latest release.",
                 source.display()
             ));
         }
