@@ -136,6 +136,11 @@ The view bobbing, hurt tilt and camera shake are in `view` and `camera_position`
 pixel meets what the world drew there. The pass runs over the world's own target (the world then always renders to
 one), and what it returns is what a shader pack's post-processing or the copy to the screen takes.
 
+A pass that does not compile is logged ("a mod's post pass did not compile") and skipped: the world is drawn without
+it until the mod gives another source. So is one the graphics driver fails to build (on Metal its shader compiler
+service can drop the connection on a very large pass, more so at startup), but that one is tried again 5 and then 30
+seconds later, since the next try may work. Neither stops the game.
+
 #### A half-size stage
 
 An expensive pass (a ray-marched volume: smoke, clouds, fog) can draw its costly part at a quarter of the pixels. Besides

@@ -9,9 +9,15 @@
 //! same source compiles and runs on either.
 //!
 //! The source is compiled when its version changes; one that does not validate is logged and skipped until the
-//! mod gives a new one. The mod's data (`render.set-data`) is a read-only storage buffer, `mod_data`: one word, 0,
+//! mod gives a new one. One the driver fails to build (wgpu's internal and out-of-memory errors: on Metal, its shader
+//! compiler service dropping the connection on a large pass) is logged and skipped too, and tried again a few
+//! seconds and then half a minute later, since the next try may work; never a device fault that ends the game.
+//! `HORIZON_DEBUG_MOD_POST_FAIL=N` makes the first N builds fail that way, to try this on any machine.
+//!
+//! The mod's data (`render.set-data`) is a read-only storage buffer, `mod_data`: one word, 0,
 //! until it gives some, uploaded again only when its version changes.
 use bytemuck::{Pod, Zeroable};
+use std::time::{Duration, Instant};
 
 /// What a mod's pass is given before its own source.
 pub const PRELUDE: &str = include_str!("mod_post.wgsl");
@@ -55,6 +61,101 @@ enum Pipelines {
     },
 }
 
+/// How long after each driver failure a pass is tried again; once these are used up it waits for a new source.
+const RETRY_AFTER: [Duration; 2] = [Duration::from_secs(5), Duration::from_secs(30)];
+
+/// Why a pass's pipelines could not be made.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Failure {
+    /// The source is at fault: it does not validate, or wgpu refuses its pipelines (a validation error, such as a
+    /// binding the layout lacks). The same source fails the same way, so it waits for a new one.
+    Invalid(String),
+    /// The driver failed to make them (wgpu's internal and out-of-memory errors). On Metal the shader compiler
+    /// service can drop its connection (XPC_ERROR_CONNECTION_INTERRUPTED) on a large pass, more so while it is busy
+    /// with the game's own pipelines at startup; the next try may work.
+    Driver(String),
+}
+
+impl Failure {
+    /// The failure the error scopes caught, if any (a validation error first: it is the source's fault).
+    fn caught(
+        validation: Option<wgpu::Error>,
+        internal: Option<wgpu::Error>,
+        out_of_memory: Option<wgpu::Error>,
+    ) -> Option<Self> {
+        match (validation, internal.or(out_of_memory)) {
+            (Some(e), _) => Some(Self::Invalid(e.to_string())),
+            (None, Some(e)) => Some(Self::Driver(e.to_string())),
+            (None, None) => None,
+        }
+    }
+}
+
+/// A source's version and what became of it (`P`: its pipelines; generic so the bookkeeping is tested without a
+/// device).
+struct Built<P> {
+    version: u64,
+    state: State<P>,
+}
+
+enum State<P> {
+    Ready(P),
+    /// Invalid: skipped until the mod gives another source.
+    Refused,
+    /// The driver failed `failures` times, the last at `at`: tried again `RETRY_AFTER[failures - 1]` after it.
+    Failed {
+        failures: u32,
+        at: Instant,
+    },
+}
+
+impl<P> Built<P> {
+    /// Whether `version` is to be built now: it is new, or it failed in the driver and its next try is due.
+    fn due(built: Option<&Self>, version: u64, now: Instant) -> bool {
+        match built {
+            Some(b) if b.version == version => match b.state {
+                State::Failed { failures, at } => RETRY_AFTER
+                    .get(failures as usize - 1)
+                    .is_some_and(|&wait| now >= at + wait),
+                State::Ready(_) | State::Refused => false,
+            },
+            _ => true,
+        }
+    }
+
+    /// What became of `version` after a build that came to `result` at `now`, `built` what it was before.
+    fn after(built: Option<Self>, version: u64, result: Result<P, Failure>, now: Instant) -> Self {
+        let failures = Self::failures(built.as_ref(), version);
+        let state = match result {
+            Ok(p) => State::Ready(p),
+            Err(Failure::Invalid(_)) => State::Refused,
+            Err(Failure::Driver(_)) => State::Failed {
+                failures: failures + 1,
+                at: now,
+            },
+        };
+        Self { version, state }
+    }
+
+    fn ready(&self) -> Option<&P> {
+        match &self.state {
+            State::Ready(p) => Some(p),
+            _ => None,
+        }
+    }
+
+    /// The driver failures before this build (0 for a first try).
+    fn failures(built: Option<&Self>, version: u64) -> u32 {
+        match built {
+            Some(Self {
+                version: v,
+                state: State::Failed { failures, .. },
+            }) if *v == version => *failures,
+            _ => 0,
+        }
+    }
+}
+
 /// What `validate` found in a pass: whether it has a half-size stage, and if so whether `fs_half` writes a second
 /// picture (location 1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -76,8 +177,10 @@ pub struct ModPost {
     /// `mod_data`, and the version of the mod's data in it (0: none, the one word 0).
     data: wgpu::Buffer,
     data_version: u64,
-    /// The source's version, and its pipelines (`None`: it did not compile).
-    built: Option<(u64, Option<Pipelines>)>,
+    /// The source's version, and its pipelines or why it has none.
+    built: Option<Built<Pipelines>>,
+    /// Builds still to fail as the driver would (`HORIZON_DEBUG_MOD_POST_FAIL`).
+    fail_builds: u32,
     output: Option<Output>,
     started: std::time::Instant,
     frames: u32,
@@ -173,6 +276,10 @@ impl ModPost {
             data: data_buffer(device, &[0]),
             data_version: 0,
             built: None,
+            fail_builds: std::env::var("HORIZON_DEBUG_MOD_POST_FAIL")
+                .ok()
+                .and_then(|n| n.trim().parse().ok())
+                .unwrap_or(0),
             output: None,
             started: std::time::Instant::now(),
             frames: 0,
@@ -203,32 +310,67 @@ impl ModPost {
         self.data_version = version;
     }
 
-    /// Compile `source` (without the prelude) if `version` is new. True when the pass can run.
+    /// Compile `source` (without the prelude) if `version` is new, or if it failed in the driver and its next try
+    /// is due. True when the pass can run; while it cannot, the frame is drawn without it.
     pub fn prepare(&mut self, device: &wgpu::Device, version: u64, source: &str) -> bool {
-        if self.built.as_ref().is_none_or(|(v, _)| *v != version) {
-            let full = format!("{PRELUDE}\n{source}");
-            let pipeline =
-                match validate(&full).and_then(|stages| self.pipelines(device, &full, stages)) {
-                    Ok(p) => Some(p),
-                    Err(e) => {
-                        log::warn!("Horizon: a mod's post pass did not compile: {e}");
-                        None
-                    }
-                };
-            self.built = Some((version, pipeline));
-        }
-        self.built.as_ref().is_some_and(|(_, p)| p.is_some())
+        self.prepare_at(device, version, source, Instant::now())
     }
 
-    /// The pass's pipelines, made under a validation error scope: a pass whose bindings do not match the layout is an
-    /// error to log, not a device fault.
+    fn prepare_at(
+        &mut self,
+        device: &wgpu::Device,
+        version: u64,
+        source: &str,
+        now: Instant,
+    ) -> bool {
+        if Built::due(self.built.as_ref(), version, now) {
+            let before = Built::failures(self.built.as_ref(), version);
+            let full = format!("{PRELUDE}\n{source}");
+            let result = validate(&full)
+                .map_err(Failure::Invalid)
+                .and_then(|stages| self.pipelines(device, &full, stages));
+            match &result {
+                Ok(_) if before > 0 => {
+                    log::info!("Horizon: a mod's post pass compiled on try {}", before + 1);
+                }
+                Ok(_) => {}
+                Err(Failure::Invalid(e)) => log::warn!(
+                    "Horizon: a mod's post pass did not compile: {e}\n\
+                     The pass is skipped until the mod gives another."
+                ),
+                Err(Failure::Driver(e)) => {
+                    let tries = before + 1;
+                    match RETRY_AFTER.get(before as usize) {
+                        Some(wait) => log::warn!(
+                            "Horizon: a mod's post pass did not compile/link in the driver (try {tries}): {e}\n\
+                             The pass is skipped, and tried again in {} s.",
+                            wait.as_secs()
+                        ),
+                        None => log::warn!(
+                            "Horizon: a mod's post pass did not compile/link in the driver (try {tries}): {e}\n\
+                             The pass is skipped until the mod gives another."
+                        ),
+                    }
+                }
+            }
+            self.built = Some(Built::after(self.built.take(), version, result, now));
+        }
+        self.built.as_ref().is_some_and(|b| b.ready().is_some())
+    }
+
+    /// The pass's pipelines, made under error scopes for every kind of error: a pass whose bindings do not match the
+    /// layout, or one the driver fails to compile, is an error to log, not a device fault (with no scope wgpu's
+    /// default handler panics, which ends the game).
     fn pipelines(
-        &self,
+        &mut self,
         device: &wgpu::Device,
         source: &str,
         stages: Stages,
-    ) -> Result<Pipelines, String> {
-        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    ) -> Result<Pipelines, Failure> {
+        // popped in the reverse order
+        let out_of_memory = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+        let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
+        let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Horizon mod post"),
             source: wgpu::ShaderSource::Wgsl(source.into()),
@@ -283,10 +425,21 @@ impl ModPost {
                 extra,
             },
         };
-        match pollster::block_on(scope.pop()) {
-            Some(e) => Err(e.to_string()),
-            None => Ok(pipelines),
+        let validation = pollster::block_on(validation.pop());
+        let internal = pollster::block_on(internal.pop());
+        let out_of_memory = pollster::block_on(out_of_memory.pop());
+        if let Some(failure) = Failure::caught(validation, internal, out_of_memory) {
+            return Err(failure);
         }
+        if self.fail_builds > 0 {
+            self.fail_builds -= 1;
+            return Err(Failure::Driver(
+                "HORIZON_DEBUG_MOD_POST_FAIL: a driver failure, as on Metal: \
+                 Compilation failed due to an interrupted connection: XPC_ERROR_CONNECTION_INTERRUPTED"
+                    .into(),
+            ));
+        }
+        Ok(pipelines)
     }
 
     /// Draw the pass over the world's `color` and `depth` (`size` pixels), and return its picture. Call after
@@ -310,7 +463,10 @@ impl ModPost {
                 half: None,
             });
         }
-        let split = matches!(&self.built, Some((_, Some(Pipelines::Split { .. }))));
+        let split = matches!(
+            self.built.as_ref().and_then(Built::ready),
+            Some(Pipelines::Split { .. })
+        );
         let output = self.output.as_mut().expect("made above");
         if split && output.half.is_none() {
             // (half the width and height, rounded up: each of its pixels stands for two by two of the world's)
@@ -385,11 +541,11 @@ impl ModPost {
             pass.set_bind_group(0, group, &[]);
             pass.draw(0..3, 0..1);
         };
-        match &self.built {
-            Some((_, Some(Pipelines::Whole(pipeline)))) => {
+        match self.built.as_ref().and_then(Built::ready) {
+            Some(Pipelines::Whole(pipeline)) => {
                 draw(encoder, &[Some(&output.view)], pipeline, &group);
             }
-            Some((_, Some(Pipelines::Split { half, join, extra }))) => {
+            Some(Pipelines::Split { half, join, extra }) => {
                 let [first, second] = output.half.as_ref().expect("made above");
                 draw(
                     encoder,
@@ -575,6 +731,129 @@ mod tests {
         );
         assert!(validate(&format!("{PRELUDE}\n{SPLIT}{reads}")).is_err());
         // the prelude leaves the declarations to the pass
-        assert!(!PRELUDE.contains("@binding(6)"));
+        // (its comments show them)
+        assert!(
+            !PRELUDE
+                .lines()
+                .any(|l| !l.trim_start().starts_with("//") && l.contains("@binding(6)"))
+        );
+    }
+
+    #[test]
+    fn a_driver_failure_is_tried_again_twice_an_invalid_pass_never() {
+        let t0 = Instant::now();
+        let driver = || Err(Failure::Driver("XPC_ERROR_CONNECTION_INTERRUPTED".into()));
+        // a new source is due; a driver failure is tried again 5 s later, then 30 s after that, then not
+        assert!(Built::<()>::due(None, 1, t0));
+        let b = Built::after(None, 1, driver(), t0);
+        assert!(b.ready().is_none());
+        assert!(!Built::due(Some(&b), 1, t0 + Duration::from_secs(4)));
+        let t1 = t0 + RETRY_AFTER[0];
+        assert!(Built::due(Some(&b), 1, t1));
+        let b = Built::after(Some(b), 1, driver(), t1);
+        assert_eq!(Built::failures(Some(&b), 1), 2);
+        assert!(!Built::due(Some(&b), 1, t1 + RETRY_AFTER[0]));
+        let t2 = t1 + RETRY_AFTER[1];
+        assert!(Built::due(Some(&b), 1, t2));
+        let b = Built::after(Some(b), 1, driver(), t2);
+        assert!(!Built::due(Some(&b), 1, t2 + Duration::from_secs(3600)));
+        // ... until the mod gives another source, which starts afresh
+        assert!(Built::due(Some(&b), 2, t2));
+        assert_eq!(Built::failures(Some(&b), 2), 0);
+        let b = Built::after(Some(b), 2, driver(), t2);
+        assert_eq!(Built::failures(Some(&b), 2), 1);
+        // a retry that works is ready and stays built
+        let b = Built::after(Some(b), 2, Ok(()), t2 + RETRY_AFTER[0]);
+        assert!(b.ready().is_some());
+        assert!(!Built::due(Some(&b), 2, t2 + Duration::from_secs(3600)));
+        // an invalid source is not tried again
+        let b = Built::<()>::after(Some(b), 3, Err(Failure::Invalid("no fs_main".into())), t2);
+        assert!(b.ready().is_none());
+        assert!(!Built::due(Some(&b), 3, t2 + Duration::from_secs(3600)));
+    }
+
+    #[test]
+    fn every_kind_of_wgpu_error_is_caught() {
+        let error = |kind: &str| {
+            let source: wgpu::ErrorSource = Box::new(std::io::Error::other(kind.to_string()));
+            let description = kind.to_string();
+            match kind {
+                "validation" => wgpu::Error::Validation {
+                    source,
+                    description,
+                },
+                "internal" => wgpu::Error::Internal {
+                    source,
+                    description,
+                },
+                _ => wgpu::Error::OutOfMemory { source },
+            }
+        };
+        assert_eq!(Failure::caught(None, None, None), None);
+        assert_eq!(
+            Failure::caught(None, Some(error("internal")), None),
+            Some(Failure::Driver("internal".into()))
+        );
+        assert!(matches!(
+            Failure::caught(None, None, Some(error("oom"))),
+            Some(Failure::Driver(_))
+        ));
+        assert_eq!(
+            Failure::caught(Some(error("validation")), Some(error("internal")), None),
+            Some(Failure::Invalid("validation".into()))
+        );
+    }
+
+    fn device() -> Option<wgpu::Device> {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let adapter = pollster::block_on(instance.request_adapter(&Default::default())).ok()?;
+        eprintln!("mod post GPU test: {}", adapter.get_info().name);
+        pollster::block_on(adapter.request_device(&Default::default()))
+            .ok()
+            .map(|(device, _)| device)
+    }
+
+    /// With a real device: a pass wgpu refuses (one passing naga, but reading a binding the whole pass's layout
+    /// lacks) and one the driver fails to build are logged and skipped, not wgpu's default handler's panic; the
+    /// driver failure is built again when its retry is due, and runs once it builds.
+    #[test]
+    fn a_pass_that_fails_to_build_does_not_end_the_game() {
+        let Some(device) = device() else {
+            eprintln!("no GPU adapter: skipped");
+            return;
+        };
+        let mut post = ModPost::new(&device, wgpu::TextureFormat::Rgba8Unorm);
+        post.fail_builds = 0;
+        let plain = "@fragment fn fs_main(in: StageIn) -> @location(0) vec4<f32> {\n    \
+            return textureSampleLevel(scene_color, linear_sampler, in.uv, 0.0);\n}\n";
+        assert!(post.prepare(&device, 1, plain));
+        // binding 6 is only in the join's layout
+        let unbound = SPLIT.replace(
+            "return textureSampleLevel(scene_color, linear_sampler, in.uv, 0.0);",
+            "return textureLoad(half_picture, vec2<i32>(0), 0);",
+        );
+        validate(&format!("{PRELUDE}\n{unbound}")).unwrap();
+        assert!(!post.prepare(&device, 2, &unbound));
+        assert!(matches!(post.built.as_ref().unwrap().state, State::Refused));
+        assert!(!post.prepare_at(
+            &device,
+            2,
+            &unbound,
+            Instant::now() + Duration::from_secs(60)
+        ));
+        // the driver fails twice, then builds
+        post.fail_builds = 2;
+        let t0 = Instant::now();
+        assert!(!post.prepare_at(&device, 3, plain, t0));
+        assert_eq!(post.fail_builds, 1);
+        assert!(!post.prepare_at(&device, 3, plain, t0 + Duration::from_secs(1)));
+        assert_eq!(
+            post.fail_builds, 1,
+            "not tried again before its retry is due"
+        );
+        let t1 = t0 + RETRY_AFTER[0];
+        assert!(!post.prepare_at(&device, 3, plain, t1));
+        assert_eq!(post.fail_builds, 0);
+        assert!(post.prepare_at(&device, 3, plain, t1 + RETRY_AFTER[1]));
     }
 }
