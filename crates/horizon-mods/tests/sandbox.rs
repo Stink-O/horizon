@@ -1,14 +1,14 @@
 //! Loads real mods built with the SDK: the coords-hud example and a guest
 //! that misbehaves on command. Needs `rustup target add wasm32-unknown-unknown`.
 use horizon_mods::{
-    COLUMN_BLOCKS, COLUMNS_BLOCKS_MAX, Clock, ColumnBlocks, Corner, FLYING_SPEED_MAX, Heightmap,
-    Mods, Output, POST_DATA_WORDS, Package, Player, Snapshot, Status, SurfaceHeights, Typed,
-    manifest::componentize,
+    ATLAS_NAMES, AtlasLookup, BlockFaces, COLUMN_BLOCKS, COLUMNS_BLOCKS_MAX, Clock, ColumnBlocks,
+    Corner, FLYING_SPEED_MAX, Heightmap, Mods, Output, POST_DATA_WORDS, Package, Player, Snapshot,
+    Sprite, SpriteFace, Status, SurfaceHeights, Tint, Typed, manifest::componentize,
 };
 use std::{
     path::{Path, PathBuf},
     process::Command,
-    sync::OnceLock,
+    sync::{Arc, OnceLock},
     time::Instant,
 };
 
@@ -17,7 +17,7 @@ id = "test_guest"
 name = "Test Guest"
 version = "0.1.0"
 api = "0.1"
-capabilities = ["chat", "storage", "input", "ui", "render", "world"]
+capabilities = ["chat", "storage", "input", "ui", "render", "world", "atlas"]
 "#;
 
 /// Builds both mods once and writes their `.hmod` files; returns the folder.
@@ -343,6 +343,90 @@ fn post_data_is_kept_versioned_and_capped() {
     assert_eq!(mods.post().unwrap().data.unwrap().1, v2);
     mods.command(&format!("data {POST_DATA_WORDS}"));
     assert_eq!(mods.post().unwrap().data.unwrap().0.len(), POST_DATA_WORDS);
+}
+
+/// The game's stand-in for the atlas: a grass block (its top tinted, its sides overlaid) and nothing else.
+struct GrassOnly(u64);
+impl AtlasLookup for GrassOnly {
+    fn block(&self, name: &str) -> Option<BlockFaces> {
+        if name != "minecraft:grass_block" {
+            return None;
+        }
+        let face = |layer, tint| SpriteFace {
+            sprite: Sprite {
+                array: 0,
+                layer,
+                animated: false,
+                cutout: layer == 3,
+            },
+            rect: (0.0, 0.0, 1.0, 1.0),
+            inset: 0.0,
+            uv: (0.0, 0.0, 1.0, 0.0, 0.0, 1.0),
+            tint,
+            translucent: false,
+        };
+        let side = vec![face(2, Tint::None), face(3, Tint::Grass)];
+        Some(BlockFaces {
+            sides: vec![
+                vec![face(0, Tint::None)],
+                vec![face(1, Tint::Grass)],
+                side.clone(),
+                side.clone(),
+                side.clone(),
+                side,
+            ],
+            particle: None,
+            cube: true,
+        })
+    }
+    fn texture(&self, _name: &str) -> Option<Sprite> {
+        None
+    }
+    fn version(&self) -> u64 {
+        self.0
+    }
+}
+
+#[test]
+fn block_sprites_are_answered_from_the_games_atlas() {
+    let mut mods = load("horizon_mods_test_guest.hmod");
+    let chat = |mods: &mut Mods| {
+        mods.drain().into_iter().find_map(|o| match o {
+            Output::Chat { text, .. } => Some(text),
+            _ => None,
+        })
+    };
+    // none given yet: every answer none, version 0
+    mods.command("sprites minecraft:grass_block");
+    assert_eq!(chat(&mut mods).as_deref(), Some("0 | none"));
+    mods.set_atlas(Some(Arc::new(GrassOnly(3))));
+    mods.command("sprites minecraft:grass_block minecraft:nope");
+    assert_eq!(
+        chat(&mut mods).as_deref(),
+        Some(
+            "3 | 0.0:- 0.1:grass 0.2:-+0.3:grass 0.2:-+0.3:grass 0.2:-+0.3:grass 0.2:-+0.3:grass cube, none"
+        )
+    );
+    // past the names a call may ask about: none
+    let many = vec!["minecraft:grass_block"; ATLAS_NAMES + 1].join(" ");
+    mods.command(&format!("sprites {many}"));
+    assert_eq!(
+        chat(&mut mods),
+        Some(format!("{ATLAS_NAMES} of {}", ATLAS_NAMES + 1))
+    );
+    // a mod with capability atlas has the arrays in its pass
+    mods.command("data 1");
+    assert!(mods.post().unwrap().atlas);
+    // and a mod loaded with the atlas has it from init on
+    let loaded = Mods::load_with_atlas(
+        &[mods_dir().join("horizon_mods_test_guest.hmod")],
+        |_| true,
+        |c| c == "give",
+        Some(Arc::new(GrassOnly(9))),
+    );
+    let mut loaded = loaded;
+    loaded.command("sprites minecraft:nope");
+    assert_eq!(chat(&mut loaded).as_deref(), Some("9 | none"));
 }
 
 #[test]

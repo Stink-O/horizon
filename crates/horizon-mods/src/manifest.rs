@@ -84,9 +84,12 @@ pub enum Capability {
     /// Raycasts, commands at operator level, sounds in the world and the
     /// player's flying speed.
     World,
+    /// The game's block textures: where each block's are in the sprite
+    /// arrays, and the arrays themselves in the post pass (API 10).
+    Atlas,
 }
 impl Capability {
-    pub const ALL: [Capability; 9] = [
+    pub const ALL: [Capability; 10] = [
         Capability::GameRead,
         Capability::Chat,
         Capability::Hud,
@@ -96,6 +99,7 @@ impl Capability {
         Capability::Ui,
         Capability::Render,
         Capability::World,
+        Capability::Atlas,
     ];
     /// The WIT interface it grants, in `horizon:mods`.
     pub fn interface(self) -> &'static str {
@@ -109,6 +113,7 @@ impl Capability {
             Capability::Ui => "ui",
             Capability::Render => "render",
             Capability::World => "world",
+            Capability::Atlas => "atlas",
         }
     }
     /// What the player reads before turning the mod on: "May <this>".
@@ -127,6 +132,7 @@ impl Capability {
             Capability::World => {
                 "change the world you play in as an operator would, set your flying speed and play sounds"
             }
+            Capability::Atlas => "draw with your block textures in its effects",
         }
     }
     /// The capability a component import needs, `Ok(None)` for one every
@@ -161,6 +167,7 @@ impl fmt::Display for Capability {
             Capability::Ui => "ui",
             Capability::Render => "render",
             Capability::World => "world",
+            Capability::Atlas => "atlas",
         };
         f.write_str(name)
     }
@@ -406,6 +413,7 @@ capabilities = ["game-read", "hud"]
             ("ui", "ui"),
             ("render", "render"),
             ("world", "world"),
+            ("atlas", "atlas"),
         ] {
             let import = format!("horizon:mods/{interface}@0.1.0");
             assert_eq!(

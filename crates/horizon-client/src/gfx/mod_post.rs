@@ -16,6 +16,13 @@
 //!
 //! The mod's data (`render.set-data`) is a read-only storage buffer, `mod_data`: one word, 0,
 //! until it gives some, uploaded again only when its version changes.
+//!
+//! A mod with capability `atlas` (docs/mods.md, "Block textures in a post pass") is also given the block sprite
+//! arrays the terrain samples, as they are (animated layers at their current frame, mip levels as the Mipmap Levels
+//! option leaves them): the first at binding 8, the terrain's sampler at 9 and the other seven arrays at 10 to 16
+//! (a 1-layer stand-in where the game has fewer). As with bindings 6 and 7 the pass declares them itself, so a pass
+//! that doesn't sample them compiles and runs everywhere; one that does is refused (logged) by a game without them,
+//! or for a mod without the capability.
 use bytemuck::{Pod, Zeroable};
 use std::time::{Duration, Instant};
 
@@ -39,6 +46,13 @@ pub struct FrameUniform {
     pub view_params: [f32; 4],
     pub mod_params: [[f32; 4]; 4],
 }
+
+/// The atlas's bindings: the first sprite array, the sampler, then the other arrays.
+pub const ATLAS_ARRAY: u32 = 8;
+pub const ATLAS_SAMPLER: u32 = 9;
+pub const ATLAS_MORE: std::ops::RangeInclusive<u32> = 10..=16;
+/// The sprite arrays the atlas bindings hold (terrain.wgsl's `SPRITE_ARRAYS` bindings).
+pub const ATLAS_ARRAYS: usize = 8;
 
 /// The half-size stage's format (both its pictures).
 const HALF_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
@@ -164,13 +178,23 @@ enum Stages {
     Split { extra: bool },
 }
 
-pub struct ModPost {
-    format: wgpu::TextureFormat,
+/// A pass's bind group layouts: the whole pass's (and the half-size stage's), and the join's (the same, and the
+/// half-size stage's two pictures at 6 and 7).
+struct Layouts {
     layout: wgpu::BindGroupLayout,
     pipeline_layout: wgpu::PipelineLayout,
-    /// The join's: the same, and the half-size stage's two pictures at 6 and 7.
     join_layout: wgpu::BindGroupLayout,
     join_pipeline_layout: wgpu::PipelineLayout,
+}
+
+pub struct ModPost {
+    format: wgpu::TextureFormat,
+    /// Without the atlas, and with it (bindings 8 to 16).
+    layouts: [Layouts; 2],
+    /// The block sprite arrays and their sampler, for a pass with the atlas (`set_atlas`).
+    atlas: Option<([wgpu::TextureView; ATLAS_ARRAYS], wgpu::Sampler)>,
+    /// Whether the pass in `built` was built with the atlas.
+    built_atlas: bool,
     linear: wgpu::Sampler,
     nearest: wgpu::Sampler,
     uniform: wgpu::Buffer,
@@ -234,7 +258,24 @@ impl ModPost {
             texture(6, wgpu::TextureSampleType::Float { filterable: true }),
             texture(7, wgpu::TextureSampleType::Float { filterable: true }),
         ];
-        let layouts = |label, entries| {
+        let array = |binding| {
+            fragment(
+                binding,
+                wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2Array,
+                    multisampled: false,
+                },
+            )
+        };
+        let atlas: Vec<_> = std::iter::once(array(ATLAS_ARRAY))
+            .chain([fragment(
+                ATLAS_SAMPLER,
+                wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            )])
+            .chain(ATLAS_MORE.map(array))
+            .collect();
+        let layouts = |label, entries: &[wgpu::BindGroupLayoutEntry]| {
             let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some(label),
                 entries,
@@ -246,8 +287,19 @@ impl ModPost {
             });
             (layout, pipeline_layout)
         };
-        let (layout, pipeline_layout) = layouts("Horizon mod post", &entries[..6]);
-        let (join_layout, join_pipeline_layout) = layouts("Horizon mod post join", &entries[..]);
+        let both = |with_atlas: bool| {
+            let extra = if with_atlas { &atlas[..] } else { &[] };
+            let whole: Vec<_> = entries[..6].iter().chain(extra).copied().collect();
+            let join: Vec<_> = entries.iter().chain(extra).copied().collect();
+            let (layout, pipeline_layout) = layouts("Horizon mod post", &whole);
+            let (join_layout, join_pipeline_layout) = layouts("Horizon mod post join", &join);
+            Layouts {
+                layout,
+                pipeline_layout,
+                join_layout,
+                join_pipeline_layout,
+            }
+        };
         let sampler = |label, filter| {
             device.create_sampler(&wgpu::SamplerDescriptor {
                 label: Some(label),
@@ -266,10 +318,9 @@ impl ModPost {
         });
         Self {
             format,
-            layout,
-            pipeline_layout,
-            join_layout,
-            join_pipeline_layout,
+            layouts: [both(false), both(true)],
+            atlas: None,
+            built_atlas: false,
             linear: sampler("Horizon mod post linear", wgpu::FilterMode::Linear),
             nearest: sampler("Horizon mod post nearest", wgpu::FilterMode::Nearest),
             uniform,
@@ -310,10 +361,28 @@ impl ModPost {
         self.data_version = version;
     }
 
+    /// The block sprite arrays (each a `D2Array` view; the game's first, then the others or a 1-layer stand-in) and
+    /// the sampler the terrain samples them with, for a pass with the atlas. Given again when the views change (the
+    /// Mipmap Levels option).
+    pub fn set_atlas(&mut self, arrays: &[wgpu::TextureView], sampler: &wgpu::Sampler) {
+        let Some(first) = arrays.first() else {
+            return;
+        };
+        let views = std::array::from_fn(|i| arrays.get(i).unwrap_or(first).clone());
+        self.atlas = Some((views, sampler.clone()));
+    }
+
     /// Compile `source` (without the prelude) if `version` is new, or if it failed in the driver and its next try
-    /// is due. True when the pass can run; while it cannot, the frame is drawn without it.
-    pub fn prepare(&mut self, device: &wgpu::Device, version: u64, source: &str) -> bool {
-        self.prepare_at(device, version, source, Instant::now())
+    /// is due; with the atlas's bindings when `atlas` (the mod has capability `atlas`). True when the pass can run;
+    /// while it cannot, the frame is drawn without it.
+    pub fn prepare(
+        &mut self,
+        device: &wgpu::Device,
+        version: u64,
+        source: &str,
+        atlas: bool,
+    ) -> bool {
+        self.prepare_at(device, version, source, atlas, Instant::now())
     }
 
     fn prepare_at(
@@ -321,14 +390,23 @@ impl ModPost {
         device: &wgpu::Device,
         version: u64,
         source: &str,
+        atlas: bool,
         now: Instant,
     ) -> bool {
+        if atlas && self.atlas.is_none() {
+            return false;
+        }
+        // (the same source with the atlas or without is another pass: other layouts)
+        if atlas != self.built_atlas {
+            self.built = None;
+            self.built_atlas = atlas;
+        }
         if Built::due(self.built.as_ref(), version, now) {
             let before = Built::failures(self.built.as_ref(), version);
             let full = format!("{PRELUDE}\n{source}");
             let result = validate(&full)
                 .map_err(Failure::Invalid)
-                .and_then(|stages| self.pipelines(device, &full, stages));
+                .and_then(|stages| self.pipelines(device, &full, stages, atlas));
             match &result {
                 Ok(_) if before > 0 => {
                     log::info!("Horizon: a mod's post pass compiled on try {}", before + 1);
@@ -366,7 +444,9 @@ impl ModPost {
         device: &wgpu::Device,
         source: &str,
         stages: Stages,
+        atlas: bool,
     ) -> Result<Pipelines, Failure> {
+        let layouts = &self.layouts[usize::from(atlas)];
         // popped in the reverse order
         let out_of_memory = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
         let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
@@ -407,18 +487,18 @@ impl ModPost {
         };
         let pipelines = match stages {
             Stages::Whole => Pipelines::Whole(pipeline(
-                &self.pipeline_layout,
+                &layouts.pipeline_layout,
                 "fs_main",
                 &[target(self.format)],
             )),
             Stages::Split { extra } => Pipelines::Split {
                 half: pipeline(
-                    &self.pipeline_layout,
+                    &layouts.pipeline_layout,
                     "fs_half",
                     &[target(HALF_FORMAT), target(HALF_FORMAT).filter(|_| extra)],
                 ),
                 join: pipeline(
-                    &self.join_pipeline_layout,
+                    &layouts.join_pipeline_layout,
                     "fs_join",
                     &[target(self.format)],
                 ),
@@ -509,9 +589,27 @@ impl ModPost {
                 resource: self.data.as_entire_binding(),
             },
         ];
+        let layouts = &self.layouts[usize::from(self.built_atlas)];
+        if self.built_atlas
+            && let Some((arrays, sampler)) = &self.atlas
+        {
+            let bindings = std::iter::once(ATLAS_ARRAY).chain(ATLAS_MORE);
+            entries.extend(
+                bindings
+                    .zip(arrays)
+                    .map(|(binding, view)| wgpu::BindGroupEntry {
+                        binding,
+                        resource: wgpu::BindingResource::TextureView(view),
+                    }),
+            );
+            entries.push(wgpu::BindGroupEntry {
+                binding: ATLAS_SAMPLER,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            });
+        }
         let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Horizon mod post"),
-            layout: &self.layout,
+            layout: &layouts.layout,
             entries: &entries,
         });
         let draw = |encoder: &mut wgpu::CommandEncoder,
@@ -565,7 +663,7 @@ impl ModPost {
                 ]);
                 let join_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("Horizon mod post join"),
-                    layout: &self.join_layout,
+                    layout: &layouts.join_layout,
                     entries: &entries,
                 });
                 draw(encoder, &[Some(&output.view)], join, &join_group);
@@ -595,7 +693,14 @@ fn picture(
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                // (the tests read the pictures back)
+                | if cfg!(test) {
+                    wgpu::TextureUsages::COPY_SRC
+                } else {
+                    wgpu::TextureUsages::empty()
+                },
             view_formats: &[],
         })
         .create_view(&Default::default())
@@ -666,7 +771,7 @@ fn validate(source: &str) -> Result<Stages, String> {
             && var
                 .binding
                 .as_ref()
-                .is_some_and(|b| b.group == 0 && b.binding >= 6)
+                .is_some_and(|b| b.group == 0 && (b.binding == 6 || b.binding == 7))
         {
             return Err("`fs_half` reads the pictures it draws (bindings 6 and 7)".into());
         }
@@ -826,34 +931,248 @@ mod tests {
         post.fail_builds = 0;
         let plain = "@fragment fn fs_main(in: StageIn) -> @location(0) vec4<f32> {\n    \
             return textureSampleLevel(scene_color, linear_sampler, in.uv, 0.0);\n}\n";
-        assert!(post.prepare(&device, 1, plain));
+        assert!(post.prepare(&device, 1, plain, false));
         // binding 6 is only in the join's layout
         let unbound = SPLIT.replace(
             "return textureSampleLevel(scene_color, linear_sampler, in.uv, 0.0);",
             "return textureLoad(half_picture, vec2<i32>(0), 0);",
         );
         validate(&format!("{PRELUDE}\n{unbound}")).unwrap();
-        assert!(!post.prepare(&device, 2, &unbound));
+        assert!(!post.prepare(&device, 2, &unbound, false));
         assert!(matches!(post.built.as_ref().unwrap().state, State::Refused));
         assert!(!post.prepare_at(
             &device,
             2,
             &unbound,
+            false,
             Instant::now() + Duration::from_secs(60)
         ));
         // the driver fails twice, then builds
         post.fail_builds = 2;
         let t0 = Instant::now();
-        assert!(!post.prepare_at(&device, 3, plain, t0));
+        assert!(!post.prepare_at(&device, 3, plain, false, t0));
         assert_eq!(post.fail_builds, 1);
-        assert!(!post.prepare_at(&device, 3, plain, t0 + Duration::from_secs(1)));
+        assert!(!post.prepare_at(&device, 3, plain, false, t0 + Duration::from_secs(1)));
         assert_eq!(
             post.fail_builds, 1,
             "not tried again before its retry is due"
         );
         let t1 = t0 + RETRY_AFTER[0];
-        assert!(!post.prepare_at(&device, 3, plain, t1));
+        assert!(!post.prepare_at(&device, 3, plain, false, t1));
         assert_eq!(post.fail_builds, 0);
-        assert!(post.prepare_at(&device, 3, plain, t1 + RETRY_AFTER[1]));
+        assert!(post.prepare_at(&device, 3, plain, false, t1 + RETRY_AFTER[1]));
+    }
+
+    /// A pass with the atlas declares bindings 8 to 16 itself (the prelude only shows them in its comments), so it
+    /// parses on every build; fs_half may sample the atlas too (only 6 and 7 are the stage's own pictures).
+    const ATLAS: &str = "@group(0) @binding(8) var block_sprites: texture_2d_array<f32>;\n\
+        @group(0) @binding(9) var block_sampler: sampler;\n\
+        @group(0) @binding(10) var block_sprites_1: texture_2d_array<f32>;\n\
+        @fragment fn fs_main(in: StageIn) -> @location(0) vec4<f32> {\n    \
+            let a = textureSampleLevel(block_sprites, block_sampler, in.uv, u32(frame.mod_params[0].x), 0.0);\n    \
+            let b = textureSampleLevel(block_sprites_1, block_sampler, in.uv, 0u, 0.0);\n    \
+            return select(a, b, frame.mod_params[0].y > 0.5);\n}\n";
+
+    #[test]
+    fn a_pass_may_declare_the_atlas() {
+        assert_eq!(validate(&format!("{PRELUDE}\n{ATLAS}")), Ok(Stages::Whole));
+        let half = "@fragment fn fs_half(in: StageIn) -> @location(0) vec4<f32> {\n    \
+            return textureSampleLevel(block_sprites, block_sampler, in.uv, 0u, 0.0);\n}\n\
+            @fragment fn fs_join(in: StageIn) -> @location(0) vec4<f32> {\n    \
+            return textureSampleLevel(half_picture, linear_sampler, in.uv, 0.0);\n}\n";
+        let decls: String = ATLAS.lines().take(3).map(|l| format!("{l}\n")).collect();
+        assert_eq!(
+            validate(&format!("{PRELUDE}\n{SPLIT}{decls}{half}")),
+            Ok(Stages::Split { extra: false })
+        );
+        // the prelude declares none of them, and shows them
+        for binding in [ATLAS_ARRAY, ATLAS_SAMPLER, 10, 16] {
+            let decl = format!("@binding({binding})");
+            assert!(
+                !PRELUDE
+                    .lines()
+                    .any(|l| !l.trim_start().starts_with("//") && l.contains(&decl))
+            );
+        }
+        assert!(
+            PRELUDE
+                .contains("//     @group(0) @binding(8) var block_sprites: texture_2d_array<f32>;")
+        );
+    }
+
+    fn device_queue() -> Option<(wgpu::Device, wgpu::Queue)> {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let adapter = pollster::block_on(instance.request_adapter(&Default::default())).ok()?;
+        eprintln!("mod post GPU test: {}", adapter.get_info().name);
+        pollster::block_on(adapter.request_device(&Default::default())).ok()
+    }
+
+    /// With a real device: a pass with the atlas samples the sprite arrays it is given (a layer of the first, the
+    /// second array), at the pixel a UV names; without the capability the same pass is refused, not a device fault;
+    /// and a pass that doesn't use the atlas runs with it as without.
+    #[test]
+    fn a_pass_with_the_atlas_samples_the_block_sprites() {
+        let Some((device, queue)) = device_queue() else {
+            eprintln!("no GPU adapter: skipped");
+            return;
+        };
+        use wgpu::util::DeviceExt;
+        let texture = |label, size: u32, layers: u32, format, usage, pixels: &[u8]| {
+            device.create_texture_with_data(
+                &queue,
+                &wgpu::TextureDescriptor {
+                    label: Some(label),
+                    size: wgpu::Extent3d {
+                        width: size,
+                        height: size,
+                        depth_or_array_layers: layers,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format,
+                    usage,
+                    view_formats: &[],
+                },
+                wgpu::util::TextureDataOrder::LayerMajor,
+                pixels,
+            )
+        };
+        let array = |t: &wgpu::Texture| {
+            t.create_view(&wgpu::TextureViewDescriptor {
+                dimension: Some(wgpu::TextureViewDimension::D2Array),
+                ..Default::default()
+            })
+        };
+        let rgba8 = wgpu::TextureFormat::Rgba8Unorm;
+        let sampled = wgpu::TextureUsages::TEXTURE_BINDING;
+        // two 2x2 sprites in the first array: red; green on the left and blue on the right
+        let (r, g, b, y) = (
+            [255, 0, 0, 255],
+            [0, 255, 0, 255],
+            [0, 0, 255, 255],
+            [255, 255, 0, 255],
+        );
+        let first: Vec<u8> = [r, r, r, r, g, b, g, b].concat();
+        let first = texture("sprites", 2, 2, rgba8, sampled, &first);
+        let second = texture("sprites 1", 2, 1, rgba8, sampled, &[y; 4].concat());
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            ..Default::default()
+        });
+        let mut post = ModPost::new(&device, rgba8);
+        post.fail_builds = 0;
+        // no atlas given yet: a pass with it waits
+        assert!(!post.prepare(&device, 1, ATLAS, true));
+        post.set_atlas(&[array(&first), array(&second)], &sampler);
+        // without the capability the pass's bindings are not in the layout: refused, logged
+        assert!(!post.prepare(&device, 1, ATLAS, false));
+        assert!(matches!(post.built.as_ref().unwrap().state, State::Refused));
+        // with it, built (the same version: another layout is another pass)
+        assert!(post.prepare(&device, 1, ATLAS, true));
+        let size = 4;
+        let world = texture(
+            "world",
+            size,
+            1,
+            rgba8,
+            sampled,
+            &[[9, 9, 9, 255]; 16].concat(),
+        );
+        let depth = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("depth"),
+            size: wgpu::Extent3d {
+                width: size,
+                height: size,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: sampled | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let (world, depth) = (
+            world.create_view(&Default::default()),
+            depth.create_view(&Default::default()),
+        );
+        let draw = |post: &mut ModPost, params: [f32; 4]| -> Vec<[u8; 4]> {
+            let mut frame = FrameUniform::default();
+            frame.mod_params[0] = params;
+            let mut encoder = device.create_command_encoder(&Default::default());
+            let out = post
+                .run(
+                    &device,
+                    &queue,
+                    &mut encoder,
+                    &world,
+                    &depth,
+                    [size, size],
+                    frame,
+                )
+                .texture()
+                .clone();
+            let read = device.create_buffer(&wgpu::BufferDescriptor {
+                label: None,
+                size: 256 * u64::from(size),
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            encoder.copy_texture_to_buffer(
+                out.as_image_copy(),
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &read,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(256),
+                        rows_per_image: None,
+                    },
+                },
+                wgpu::Extent3d {
+                    width: size,
+                    height: size,
+                    depth_or_array_layers: 1,
+                },
+            );
+            queue.submit([encoder.finish()]);
+            read.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+            device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            let data = read.slice(..).get_mapped_range().unwrap();
+            (0..size as usize * size as usize)
+                .map(|i| {
+                    let at = i / size as usize * 256 + i % size as usize * 4;
+                    [data[at], data[at + 1], data[at + 2], data[at + 3]]
+                })
+                .collect()
+        };
+        // layer 0 of the first array, everywhere red
+        assert!(draw(&mut post, [0.0; 4]).iter().all(|&p| p == r));
+        // layer 1: its left half green, its right half blue (u 0 to 1 across the picture)
+        let one = draw(&mut post, [1.0, 0.0, 0.0, 0.0]);
+        assert_eq!([one[0], one[1], one[2], one[3]], [g, g, b, b]);
+        assert_eq!([one[12], one[15]], [g, b]);
+        // the second array
+        assert!(
+            draw(&mut post, [0.0, 1.0, 0.0, 0.0])
+                .iter()
+                .all(|&p| p == y)
+        );
+        // a pass that doesn't use the atlas runs with it as without
+        let plain = "@fragment fn fs_main(in: StageIn) -> @location(0) vec4<f32> {\n    \
+            return textureSampleLevel(scene_color, linear_sampler, in.uv, 0.0);\n}\n";
+        assert!(post.prepare(&device, 2, plain, true));
+        assert!(
+            draw(&mut post, [0.0; 4])
+                .iter()
+                .all(|&p| p == [9, 9, 9, 255])
+        );
+        assert!(post.prepare(&device, 2, plain, false));
+        assert!(
+            draw(&mut post, [0.0; 4])
+                .iter()
+                .all(|&p| p == [9, 9, 9, 255])
+        );
     }
 }

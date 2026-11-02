@@ -6,9 +6,10 @@
 //! `/typed` chats what was typed on it, `/surface <tag>` asks for the heights
 //! of columns (1, 2) and (-3, 40), `/heights` chats the answers come back,
 //! `/data <n>` gives a post pass the words 0..n, `/columns <tag> <n> <below>
-//! <above>` asks for the blocks of n columns, `/blocks` chats the answers; `tick` and `frame` do
+//! <above>` asks for the blocks of n columns, `/blocks` chats the answers, `/sprites <name>...` chats
+//! what `atlas.block-sprites` says of each block (and `atlas.resources-version`); `tick` and `frame` do
 //! nothing, to measure the cost of a call.
-use horizon_mod_sdk::{Mod, Registration, chat, input, render, storage, ui, world};
+use horizon_mod_sdk::{Mod, Registration, atlas, chat, input, render, storage, ui, world};
 
 struct Guest {
     ticks: u64,
@@ -18,7 +19,7 @@ impl Mod for Guest {
     fn init() -> Result<(Self, Registration), String> {
         let hooks = [
             "spin", "panic", "grow", "hello", "save", "load", "save_key", "fly", "screen", "typed",
-            "surface", "heights", "data", "columns", "blocks",
+            "surface", "heights", "data", "columns", "blocks", "sprites",
         ]
         .into_iter()
         .fold(Registration::new(), Registration::command)
@@ -120,6 +121,47 @@ impl Mod for Guest {
                     })
                     .collect();
                 chat::show(&answers.join(", "));
+                Ok(None)
+            }
+            "sprites" => {
+                let names: Vec<String> = args.split(' ').map(str::to_owned).collect();
+                let all = atlas::block_sprites(&names);
+                if all.len() > 8 {
+                    let found = all.iter().filter(|b| b.is_some()).count();
+                    chat::show(&format!("{found} of {}", all.len()));
+                    return Ok(None);
+                }
+                let answers: Vec<String> = all
+                    .into_iter()
+                    .map(|b| match b {
+                        None => "none".into(),
+                        Some(b) => {
+                            let sides: Vec<String> = b
+                                .sides
+                                .iter()
+                                .map(|faces| {
+                                    let faces: Vec<String> = faces
+                                        .iter()
+                                        .map(|f| {
+                                            let tint = match f.tint {
+                                                atlas::Tint::None => "-".to_string(),
+                                                atlas::Tint::Grass => "grass".into(),
+                                                atlas::Tint::Foliage => "foliage".into(),
+                                                atlas::Tint::DryFoliage => "dry".into(),
+                                                atlas::Tint::Water => "water".into(),
+                                                atlas::Tint::Fixed(c) => format!("{c:06x}"),
+                                            };
+                                            format!("{}.{}:{tint}", f.sprite.array, f.sprite.layer)
+                                        })
+                                        .collect();
+                                    faces.join("+")
+                                })
+                                .collect();
+                            format!("{}{}", sides.join(" "), if b.cube { " cube" } else { "" })
+                        }
+                    })
+                    .collect();
+                chat::show(&format!("{} | {}", atlas::resources_version(), answers.join(", ")));
                 Ok(None)
             }
             "data" => {

@@ -297,6 +297,8 @@ pub struct ModPost<'a> {
     pub params: [f32; 16],
     /// The words it reads as `mod_data` (`render.set-data`), and a version that changes with them.
     pub data: Option<(&'a [u32], u64)>,
+    /// The mod has capability `atlas`: the pass is given the block sprite arrays (gfx/mod_post.rs).
+    pub atlas: bool,
     /// The time of day (0 sunrise, 0.25 noon) and the partial tick, for `frame.time`.
     pub day_fraction: f32,
     pub partial_tick: f32,
@@ -2204,7 +2206,9 @@ impl Renderer {
             });
         let depth = Self::depth(&device, &config, cull.as_ref());
         let world_post = world_post::Post::new(&device, config.format.remove_srgb_suffix());
-        let mod_post = mod_post::ModPost::new(&device, config.format.remove_srgb_suffix());
+        let mut mod_post = mod_post::ModPost::new(&device, config.format.remove_srgb_suffix());
+        // (a mod with capability `atlas` samples the terrain's own sprite arrays)
+        mod_post.set_atlas(&sprite_views, &sprite_sampler);
         let uploads = upload::Uploads::new(&device);
         let section_uploads = upload::Uploads::with_chunk(&device, SECTION_UPLOAD_CHUNK);
         let stars = stars::Stars::new(&device, config.format.remove_srgb_suffix());
@@ -2836,6 +2840,7 @@ impl Renderer {
         }
         self.mipmaps = levels;
         let views = sprite_views(&self.sprite_textures, &self.sprite_unused, Some(levels + 1));
+        self.mod_post.set_atlas(&views, &self.sprite_sampler);
         self.group = terrain_group(
             &self.device,
             "Horizon terrain resources",
@@ -3695,7 +3700,7 @@ impl Renderer {
         }
         // A mod's post pass, compiled when its source changes; skipped while it does not compile.
         let mod_post = frame.mod_post.filter(|mp| {
-            !frame.title && self.mod_post.prepare(&self.device, mp.version, mp.source)
+            !frame.title && self.mod_post.prepare(&self.device, mp.version, mp.source, mp.atlas)
         });
         // The world's targets: the screen, or the scaled target of `post`.
         let pack_post = !frame.title && self.pack_post.as_ref().is_some_and(|p| p.1.is_some());

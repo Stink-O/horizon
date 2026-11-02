@@ -194,6 +194,93 @@ interface ui {
     cursor: func() -> option<point>;
 }
 
+/// Capability `atlas`: the game's block textures, for the mod's post pass
+/// (capability `render`) to draw blocks with, as the world draws them. With
+/// it the pass is also given the block sprite arrays, which it declares
+/// itself (docs/mods.md, "Block textures in a post pass"):
+///     @group(0) @binding(8) var block_sprites: texture_2d_array<f32>;
+///     @group(0) @binding(9) var block_sampler: sampler;
+/// and, for a content mod's textures past the first 2048 layers, arrays 1
+/// to 7 at bindings 10 to 16 (`block_sprites_1` ...). Each texture is a
+/// whole layer, square, its UVs 0 to 1 within it; animated ones always hold
+/// the frame being shown. The textures are the player's own (their
+/// resource packs included): the mod ships none.
+interface atlas {
+    /// What a face is coloured with, as the game colours the block: the
+    /// colour of the biome where it is (grass, foliage, dry foliage, water;
+    /// `read-columns` gives them) or a fixed one (0xRRGGBB). Multiply the
+    /// texture by it.
+    variant tint {
+        none,
+        grass,
+        foliage,
+        dry-foliage,
+        water,
+        fixed(u32),
+    }
+    /// A texture in the sprite arrays: `array` (0 for every vanilla texture:
+    /// binding 8; 1 to 7 at bindings 10 to 16) and its `layer` there.
+    record sprite {
+        array: u32,
+        layer: u32,
+        /// It animates (water, lava, fire, ...); the arrays hold its frame.
+        animated: bool,
+        /// Some of its pixels are clear (alpha 0): leaves, glass, flowers.
+        cutout: bool,
+    }
+    /// One face of a block's model, on one side of the block. A side's two
+    /// axes run along x then z for down and up, x then y for north and
+    /// south, z then y for west and east, from 0 at the block's corner
+    /// nearest 0, 0, 0 to 1.
+    record face {
+        sprite: sprite,
+        /// Where it lies on the side, in the side's axes: a0, b0, a1, b1
+        /// (0, 0, 1, 1 for a whole face).
+        rect: tuple<f32, f32, f32, f32>,
+        /// How far into the block from the side's plane (0 for a cube's
+        /// face, 0.5 for the top of a bottom slab).
+        inset: f32,
+        /// The texture across the side: the point a, b of it shows the
+        /// sprite at u = u0 + a * du-u + b * dv-u, v = v0 + a * du-v + b *
+        /// dv-v; given as u0, v0, du-u, du-v, dv-u, dv-v. A rotated model
+        /// (a log on its side) is rotated here.
+        uv: tuple<f32, f32, f32, f32, f32, f32>,
+        tint: tint,
+        /// Partly clear pixels: drawn blended, as the world draws glass.
+        translucent: bool,
+    }
+    /// What a block draws.
+    record block-faces {
+        /// Six lists, one a side: down, up, north, south, west, east. Each
+        /// holds its faces in the order drawn (a grass block's side: its
+        /// dirt and grass, then the grass overlay tinted over it); empty
+        /// for a side with none. Faces that don't lie flat on a side (a
+        /// flower's crossed planes) are left out: use `particle`.
+        sides: list<list<face>>,
+        /// The model's particle texture (what breaking it scatters).
+        particle: option<sprite>,
+        /// A plain cube: a whole face on every side at its plane (and
+        /// overlays on them), nothing else.
+        cube: bool,
+    }
+    /// For each name (`minecraft:grass_block`, `oak_log[axis=x]`:
+    /// properties left out take the block's default), what its model
+    /// draws, as the world draws that state (the first of its random
+    /// variants); none for a block the game doesn't know. A fluid has its
+    /// still texture on all six sides; a block drawn only as a block entity
+    /// (a chest) has none. At most 4,096 names a call; the rest are none.
+    /// Resource packs may change the layers: ask again when the game says
+    /// the pack changed (`resources-version`).
+    block-sprites: func(names: list<string>) -> list<option<block-faces>>;
+    /// For each texture name (`minecraft:block/stone`, `block/stone`), its
+    /// sprite; none for one the arrays don't hold (they hold the textures
+    /// block and item models use). At most 4,096 names a call.
+    texture-sprites: func(names: list<string>) -> list<option<sprite>>;
+    /// Changes whenever the textures are loaded again (a resource pack
+    /// turned on or off): the layers may have moved. 0 until they load.
+    resources-version: func() -> u64;
+}
+
 /// Capability `render`: a post-processing pass the mod supplies, drawn over
 /// the world (under the hand and the HUD), before a shader pack's own
 /// post-processing, if any.
@@ -406,5 +493,6 @@ world horizon-mod {
     import ui;
     import render;
     import %world;
+    import atlas;
     export events;
 }

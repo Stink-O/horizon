@@ -9,6 +9,17 @@
 //     @group(0) @binding(6) var half_picture: texture_2d<f32>;
 //     @group(0) @binding(7) var half_extra: texture_2d<f32>;
 // fs_half may not read them. `frame.resolution` is the world's picture's in both stages.
+//
+// A mod with capability `atlas` is also given the game's block textures, the sprite arrays the terrain samples, which
+// the pass declares itself too (the same source compiles on a game without them, while it doesn't sample them):
+//     @group(0) @binding(8) var block_sprites: texture_2d_array<f32>;
+//     @group(0) @binding(9) var block_sampler: sampler;
+// and, only for a content mod's textures past the first 2048 layers, arrays 1 to 7 at bindings 10 to 16
+// (`block_sprites_1` ...). Each texture is a whole square layer, its UVs 0 to 1; `atlas.block-sprites` says which
+// layer a block's faces are and how their UVs run. The sampler is the terrain's (nearest, repeating, nearest mip
+// level); the arrays have the mip levels the Mipmap Levels option leaves (textureNumLevels). The texels are as the
+// world uses them (gamma-encoded, as scene_color is). Sample with textureSampleLevel or textureSampleGrad (a ray
+// marcher's hits are not in uniform control flow). Both stages may sample them.
 
 struct Frame {
     view: mat4x4<f32>,

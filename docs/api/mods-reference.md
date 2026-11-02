@@ -16,10 +16,11 @@ The contract between Horizon and its mods: the WIT package `horizon:mods@0.1.0`,
 | `ui` | [`ui`](#ui) | open a screen of its own |
 | `render` | [`render`](#render) | draw effects over the world |
 | `world` | [`world`](#world) | change the world you play in as an operator would, set your flying speed and play sounds |
+| `atlas` | [`atlas`](#atlas) | draw with your block textures in its effects |
 
 ## World `horizon-mod`
 
-- Imports (what the game offers): `log`, `game`, `chat`, `hud`, `storage`, `input`, `ui`, `render`, `world`
+- Imports (what the game offers): `log`, `game`, `chat`, `hud`, `storage`, `input`, `ui`, `render`, `world`, `atlas`
 - Exports (what the mod provides): `events`
 
 ## `log`
@@ -220,6 +221,65 @@ Capability `ui`: one screen the mod owns. The mod hands the game what to draw; t
 | `close` | `func()` | Closes the mod's screen, if it is open (the player's Escape closes it too). |
 | `cursor` | `func() -> option<point>` | The cursor in GUI pixels from the centre while the screen is open. |
 
+## `atlas`
+
+Access: capability `atlas`.
+
+Capability `atlas`: the game's block textures, for the mod's post pass (capability `render`) to draw blocks with, as the world draws them. With it the pass is also given the block sprite arrays, which it declares itself (docs/mods.md, "Block textures in a post pass"): @group(0) @binding(8) var block_sprites: texture_2d_array<f32>; @group(0) @binding(9) var block_sampler: sampler; and, for a content mod's textures past the first 2048 layers, arrays 1 to 7 at bindings 10 to 16 (`block_sprites_1` ...). Each texture is a whole layer, square, its UVs 0 to 1 within it; animated ones always hold the frame being shown. The textures are the player's own (their resource packs included): the mod ships none.
+
+### variant `tint`
+
+What a face is coloured with, as the game colours the block: the colour of the biome where it is (grass, foliage, dry foliage, water; `read-columns` gives them) or a fixed one (0xRRGGBB). Multiply the texture by it.
+
+| Case | Payload | |
+| --- | --- | --- |
+| `none` |  |  |
+| `grass` |  |  |
+| `foliage` |  |  |
+| `dry-foliage` |  |  |
+| `water` |  |  |
+| `fixed` | `u32` |  |
+
+### record `sprite`
+
+A texture in the sprite arrays: `array` (0 for every vanilla texture: binding 8; 1 to 7 at bindings 10 to 16) and its `layer` there.
+
+| Field | Type | |
+| --- | --- | --- |
+| `array` | `u32` |  |
+| `layer` | `u32` |  |
+| `animated` | `bool` | It animates (water, lava, fire, ...); the arrays hold its frame. |
+| `cutout` | `bool` | Some of its pixels are clear (alpha 0): leaves, glass, flowers. |
+
+### record `face`
+
+One face of a block's model, on one side of the block. A side's two axes run along x then z for down and up, x then y for north and south, z then y for west and east, from 0 at the block's corner nearest 0, 0, 0 to 1.
+
+| Field | Type | |
+| --- | --- | --- |
+| `sprite` | `sprite` |  |
+| `rect` | `tuple<f32, f32, f32, f32>` | Where it lies on the side, in the side's axes: a0, b0, a1, b1 (0, 0, 1, 1 for a whole face). |
+| `inset` | `f32` | How far into the block from the side's plane (0 for a cube's face, 0.5 for the top of a bottom slab). |
+| `uv` | `tuple<f32, f32, f32, f32, f32, f32>` | The texture across the side: the point a, b of it shows the sprite at u = u0 + a * du-u + b * dv-u, v = v0 + a * du-v + b * dv-v; given as u0, v0, du-u, du-v, dv-u, dv-v. A rotated model (a log on its side) is rotated here. |
+| `tint` | `tint` |  |
+| `translucent` | `bool` | Partly clear pixels: drawn blended, as the world draws glass. |
+
+### record `block-faces`
+
+What a block draws.
+
+| Field | Type | |
+| --- | --- | --- |
+| `sides` | `list<list<face>>` | Six lists, one a side: down, up, north, south, west, east. Each holds its faces in the order drawn (a grass block's side: its dirt and grass, then the grass overlay tinted over it); empty for a side with none. Faces that don't lie flat on a side (a flower's crossed planes) are left out: use `particle`. |
+| `particle` | `option<sprite>` | The model's particle texture (what breaking it scatters). |
+| `cube` | `bool` | A plain cube: a whole face on every side at its plane (and overlays on them), nothing else. |
+
+| Function | Signature | What it does |
+| --- | --- | --- |
+| `block-sprites` | `func(names: list<string>) -> list<option<block-faces>>` | For each name (`minecraft:grass_block`, `oak_log[axis=x]`: properties left out take the block's default), what its model draws, as the world draws that state (the first of its random variants); none for a block the game doesn't know. A fluid has its still texture on all six sides; a block drawn only as a block entity (a chest) has none. At most 4,096 names a call; the rest are none. Resource packs may change the layers: ask again when the game says the pack changed (`resources-version`). |
+| `texture-sprites` | `func(names: list<string>) -> list<option<sprite>>` | For each texture name (`minecraft:block/stone`, `block/stone`), its sprite; none for one the arrays don't hold (they hold the textures block and item models use). At most 4,096 names a call. |
+| `resources-version` | `func() -> u64` | Changes whenever the textures are loaded again (a resource pack turned on or off): the layers may have moved. 0 until they load. |
+
 ## `render`
 
 Access: capability `render`.
@@ -314,7 +374,7 @@ The answer to a `read-columns` query: its `tag`; the names of the blocks it saw 
 | `run-commands` | `func(commands: list<string>)` | Runs commands as the server would (operator level, no chat feedback), in order, right after this call returns, all in this tick. |
 | `play-sound` | `func(event: string, at: option<tuple<f64, f64, f64>>, volume: f32, pitch: f32)` | A sound event (vanilla's or a resource pack's) at a point, or following the player when `at` is none. |
 | `set-flying-speed` | `func(speed: option<f32>)` | The local player's flying speed (creative flight), as vanilla's abilities hold it: 0.05 is vanilla's, sprinting doubles it, at most 50. The game keeps it until the mod changes it or stops, through respawns, game mode changes and other worlds; none (or a value that is not a number) puts vanilla's back. A spectator keeps the scroll wheel's speed. On a remote server it is ignored and logged. |
-| `push-player` | `func(x: f32, y: f32, z: f32)` | Adds to the local player's velocity, in blocks a tick, as an explosion's knockback does: the player is thrown and falls back under gravity, flying or not, colliding as they move. Each component is clamped to -4..4 a call; a spectator, or a value that is not a number, is left alone. |
+| `push-player` | `func(x: f32, y: f32, z: f32)` | Adds to the local player's velocity, in blocks a tick (`x`, `y`, `z`), as an explosion's knockback does: the player is thrown and falls back under gravity, flying or not, colliding as they move. Each component is clamped to -4..4 a call; a spectator, or a value that is not a number, is left alone. |
 | `edit-blocks` | `func(edit: block-edit)` | Sets many blocks at once, far faster than `fill` and `setblock`: a run per span of a column, each block its own palette entry if need be. Made on the world's thread right after this call returns, in order with `run-commands`, as `fill ... strict` makes them: nothing round them is told (no neighbour or shape updates, no drops, sand and gravel stay up, water and lava keep still), and a block entity goes with its block. Light is worked out again once for each chunk changed, off the world's thread, each chunk is remeshed once, and the players who see a chunk are sent it whole. Heights (`surface`) are read before any of the edit's changes. Only loaded chunks change, within the world's height; the rest of a run is left out. At most 1,048,576 runs and 4,096 palette entries and filters a call. A block or filter that does not parse, or an index past the end, leaves the whole edit out (logged). On a remote server it is ignored and logged. |
 | `surface-height` | `func(tag: u32, columns: list<tuple<s32, s32>>, heightmap: heightmap)` | Asks the world for the height of each of `columns` (x, z) on `heightmap`. The world is read where `edit-blocks` changes it, on its own thread, in order with `run-commands` and `edit-blocks` (a query made after an edit sees it), and the answer comes back through `poll-surface-heights`, with the `tag` given here: a tick or two later in single player (the world answers between two of its ticks; the mod never waits on it). Chunks a mod keeps loaded (`forceload`) are read as any other. At most 65,536 columns a call; a query with more is left out (logged). On a remote server every height is none, answered at once. |
 | `poll-surface-heights` | `func() -> list<surface-heights>` | The answers to `surface-height` queries that came back since the last call, oldest first. |

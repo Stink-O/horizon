@@ -93,6 +93,7 @@ folder, loads no runtime and plays exactly like vanilla 26.3.
 | `ui` | `ui` | `show(draws)`: opens the mod's screen (or redraws it) from fills, quads, sprites, items and text in GUI pixels from the centre, up to 4096; `close()`; `cursor()`. Clicks, typing and Escape come back through `input`; the screen does not pause |
 | `render` | `render` | `set-post(wgsl)`: a post-processing pass (WGSL after the [mod pass prelude](#a-mods-post-pass)), drawn over the world before a shader pack's post-processing; `set-params(16 floats)`, read as `frame.mod_params`; `set-data(words)`: up to 262,144 `u32` words (1 MiB), read as the storage buffer `mod_data`, uploaded only when they change; `clear-post()` (the source, the parameters and the data); `shake(strength, seconds)`: a camera jolt that fades out (jolts add up; scaled by Distortion Effects) |
 | `world` | `world` | `raycast(distance)`: the first block along the view, up to 1024 blocks (past the render distance only across the distant terrain, with LOD Distance on); `run-commands(list)`: at operator level, silently, this tick (up to 8192 per call; single player and LAN hosts only); `play-sound(event, at, volume, pitch)`; `edit-blocks(edit)`: many blocks at once, straight into the chunk sections (a palette of block states, filters, and runs up columns, each from a height or a heightmap; as `fill ... strict`, in order with `run-commands`; each chunk changed is lit again once off the world's thread, remeshed once and sent whole; up to 1,048,576 runs a call; single player and LAN hosts only); `surface-height(tag, columns, heightmap)` and `poll-surface-heights()`: the height of up to 65,536 columns a query on a heightmap (the one `edit-blocks` counts from; none where a chunk is not loaded), read on the world's thread in order with `run-commands` and `edit-blocks`, answered a tick or two later with its `tag` (the mod never waits on the world; on a remote server every height is none); `read-columns(tag, columns, heightmap, below, above)` and `poll-columns()`: the blocks of up to 65,536 columns a query round their height on a heightmap, `below` under it and `above` from it up (at most 64 a column and 1,048,576 in all), as indices into the names of the blocks seen (`minecraft:snow`, no properties), with each column's height (none, and air, where a chunk is not loaded) and its biome's grass, foliage and water tints, read and answered as `surface-height` is; `set-flying-speed(speed)`: the player's creative flying speed (vanilla's 0.05, at most 50), kept through respawns, game mode changes and other worlds until the mod changes it or stops (single player and LAN hosts only); `push-player(x, y, z)`: adds to the local player's velocity, blocks a tick (each at most 4), as an explosion's knockback does: thrown, colliding, falling back under gravity (not a spectator) |
+| `atlas` | `atlas` | `block-sprites(names)`: for each block (`minecraft:grass_block`, `oak_log[axis=x]`), what its model draws on each of its six sides: each face's sprite (array and layer), where it lies on the side, how its texture runs across it (rotations included), its tint source (grass, foliage, dry foliage, water or a fixed colour) and whether it is cut out, translucent or animated, the faces in the order drawn (a grass block's side and then its overlay), its particle sprite, and whether it is a plain cube; `texture-sprites(names)`: a texture's sprite by name; `resources-version()`: changes when the textures load anew. With it, the mod's post pass is given the block sprite arrays ([Block textures in a post pass](#block-textures-in-a-post-pass)) |
 
 | Hook (export) | When |
 |---|---|
@@ -165,6 +166,47 @@ upsample), so edges against blocks and the sky stay sharp.
 Because the declarations are the pass's own, the same source compiles on a game without the stages (it draws
 `fs_main` alone, at full size), and a mod needs no new import to use them: `fs_main` is the whole pass at full size
 for that case. A pass with only one of `fs_half` and `fs_join` does not compile.
+
+#### Block textures in a post pass
+
+A mod with capability `atlas` can draw blocks in its pass with the player's own block textures (their resource packs
+included; the mod ships none), as the terrain samples them: the game's block sprite arrays, each texture a whole
+square layer with UVs 0 to 1 across it. The pass declares them itself, as it does the half-size pictures:
+
+```wgsl
+@group(0) @binding(8) var block_sprites: texture_2d_array<f32>;
+@group(0) @binding(9) var block_sampler: sampler;
+// only for a content mod's textures past the first 2048 layers (`sprite.array` 1 to 7):
+@group(0) @binding(10) var block_sprites_1: texture_2d_array<f32>;
+```
+
+Arrays 1 to 7 are bindings 10 to 16 (a 1-layer stand-in where the game has fewer); every vanilla texture is in array
+0. `block_sampler` is the terrain's (nearest, repeating, the nearest mip level); the arrays have the mip levels the
+Mipmap Levels option leaves (`textureNumLevels`), and an animated texture (water, lava, fire, ...) always holds the
+frame being shown. The texels are as the world uses them, gamma-encoded like `scene_color`. Sample with
+`textureSampleLevel` or `textureSampleGrad`: a ray marcher's hits aren't in uniform control flow. Both stages of a
+split pass may sample them.
+
+`atlas.block-sprites(names)` says where each block's textures are. For each side (down, up, north, south, west,
+east), its faces in the order drawn, each with its `sprite` (`array`, `layer`), its `rect` on the side and `inset`
+from the side's plane (a whole face at 0, 0, 1, 1 and 0), its `uv` map and its `tint`. A side's axes run along x then
+z for down and up, x then y for north and south, z then y for west and east, from the block's corner nearest 0, 0, 0;
+the point (a, b) of a side shows the texture at `(u0, v0) + a * (du-u, du-v) + b * (dv-u, dv-v)`. For a plain block
+on its north side that is `u = 1 - x, v = 1 - y` (seen from outside, the texture's top left at the side's top left);
+a log on its side is turned there. A tinted face is multiplied by its source's colour: grass, foliage, dry foliage
+and water are the biome's (`world.read-columns` gives a column's), `fixed` a constant (spruce and birch leaves). A
+grass block's side is two faces: the dirt-and-grass side, then the grey overlay tinted with grass and laid over it
+where its alpha is. `cutout` sprites (leaves, glass, flowers) have clear pixels to leave out. The model is the state's
+first random variant: stone and grass have turned variants the mod may turn itself. Faces that don't lie flat on a
+side (a flower's crossed planes) are left out, and the block's `particle` sprite stands for them.
+
+The mod packs what it needs into `mod_data` itself, once: say a few words a block, a side's layer and its tint. Ask
+again when `atlas.resources-version()` changes (a resource pack turned on or off can move the layers). A pass that
+samples the arrays is refused (logged, skipped) by a game without them, or for a mod without the capability; one that
+declares them and samples none compiles anywhere.
+
+The capability is new in the fork's API 10 (release `orbital-mod-api-10`): an older game won't start a mod that lists
+`atlas` in its manifest or imports the interface, as with every capability before it.
 
 ### Planned interfaces
 

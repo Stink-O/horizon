@@ -63,6 +63,9 @@ pub(super) struct ModsState {
     /// Answers to the mods' `world.read-columns` queries, read on the world's thread, for their next tick.
     #[cfg(feature = "mods")]
     columns: std::sync::Arc<std::sync::Mutex<Vec<(String, horizon_mods::ColumnBlocks)>>>,
+    /// The resources the mods' `atlas` calls were last answered from, and how many times they changed.
+    #[cfg(feature = "mods")]
+    atlas: Option<(std::sync::Arc<horizon_client::streaming::WorkerContext>, u64)>,
 }
 impl ModsState {
     /// The chat's command tree: vanilla's, plus the running mods' commands.
@@ -215,11 +218,12 @@ impl Game<'_> {
         self.mods
             .mods
             .post()
-            .map(|p| (p.source, p.version, p.params, p.data))
+            .map(|p| (p.source, p.version, p.params, p.data, p.atlas))
     }
     /// Reads `horizon-mods/` and the dev mods, and starts the ones turned on.
     pub(super) fn start_mods(&mut self) {
         let dir = Self::options_path().with_file_name(mod_list::DIR);
+        let atlas = self.mod_atlas();
         let dev = &self.mods.dev;
         let mut paths = horizon_mods::find(&dir);
         paths.retain(|p| !dev.contains(p));
@@ -232,7 +236,7 @@ impl Game<'_> {
             .collect();
         let enabled = &self.settings.mods.enabled;
         let on = |id: &str| enabled.contains(id) || dev_ids.iter().any(|d| d == id);
-        let mods = Mods::load(&paths, on, vanilla_command);
+        let mods = Mods::load_with_atlas(&paths, on, vanilla_command, atlas);
         self.mods.mods = mods;
         self.list_mods();
         self.sync_mod_commands();
@@ -406,7 +410,33 @@ impl Game<'_> {
         })
     }
     /// A game tick.
+    /// Where the block textures are, for the mods' `atlas` calls: from the pack's resources in use, a new answer
+    /// (and version) when they change.
+    fn mod_atlas(&mut self) -> Option<std::sync::Arc<dyn horizon_mods::AtlasLookup>> {
+        let context = &self.pack.context;
+        let version = match &self.mods.atlas {
+            Some((c, v)) if std::sync::Arc::ptr_eq(c, context) => *v,
+            Some((_, v)) => v + 1,
+            None => 1,
+        };
+        self.mods.atlas = Some((context.clone(), version));
+        Some(std::sync::Arc::new(atlas::GameAtlas {
+            context: context.clone(),
+            version,
+        }))
+    }
     pub(super) fn tick_mods(&mut self) {
+        if self.mods.mods.is_running()
+            && !self
+                .mods
+                .atlas
+                .as_ref()
+                .is_some_and(|(c, _)| std::sync::Arc::ptr_eq(c, &self.pack.context))
+        {
+            // (the resources loaded anew: a resource pack turned on or off)
+            let atlas = self.mod_atlas();
+            self.mods.mods.set_atlas(atlas);
+        }
         if self.mods.mods.is_running() {
             // (the world's answers to their height queries since the last tick)
             let answers = self
@@ -1059,5 +1089,74 @@ fn command_span(line: &str) -> &'static str {
         "playsound" => "mod_playsound",
         "kill" => "mod_kill",
         _ => "mod_other",
+    }
+}
+
+/// Capability `atlas`'s answers, from the game's resources (`horizon_client::block_sprites`).
+#[cfg(feature = "mods")]
+mod atlas {
+    use horizon_client::{
+        block_sprites::{self, Lookup, SpriteRef},
+        mesher::TintSource,
+        streaming::WorkerContext,
+    };
+    use horizon_mods::{BlockFaces, Sprite, SpriteFace, Tint};
+    use std::sync::Arc;
+
+    pub(super) struct GameAtlas {
+        pub context: Arc<WorkerContext>,
+        pub version: u64,
+    }
+
+    fn sprite(s: SpriteRef) -> Sprite {
+        Sprite {
+            array: s.array,
+            layer: s.layer,
+            animated: s.animated,
+            cutout: s.cutout,
+        }
+    }
+
+    /// As the WIT gives it (`atlas.block-faces`).
+    pub(super) fn faces(b: block_sprites::BlockSprites) -> BlockFaces {
+        BlockFaces {
+            sides: b
+                .sides
+                .into_iter()
+                .map(|side| {
+                    side.into_iter()
+                        .map(|f| SpriteFace {
+                            sprite: sprite(f.sprite),
+                            rect: f.rect.into(),
+                            inset: f.inset,
+                            uv: f.uv.into(),
+                            tint: match f.tint {
+                                None => Tint::None,
+                                Some(TintSource::Grass) => Tint::Grass,
+                                Some(TintSource::Foliage) => Tint::Foliage,
+                                Some(TintSource::DryFoliage) => Tint::DryFoliage,
+                                Some(TintSource::Water) => Tint::Water,
+                                Some(TintSource::Fixed(c)) => Tint::Fixed(c),
+                            },
+                            translucent: f.translucent,
+                        })
+                        .collect()
+                })
+                .collect(),
+            particle: b.particle.map(sprite),
+            cube: b.cube,
+        }
+    }
+
+    impl horizon_mods::AtlasLookup for GameAtlas {
+        fn block(&self, name: &str) -> Option<BlockFaces> {
+            Lookup::of(&self.context).block(name).map(faces)
+        }
+        fn texture(&self, name: &str) -> Option<Sprite> {
+            Lookup::of(&self.context).texture(name).map(sprite)
+        }
+        fn version(&self) -> u64 {
+            self.version
+        }
     }
 }

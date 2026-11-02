@@ -18,6 +18,7 @@ mod bindings {
     });
 }
 pub use bindings::horizon::mods::{
+    atlas::{BlockFaces, Face as SpriteFace, Sprite, Tint},
     game::{Clock, Player},
     hud::{Corner, Line},
     input::{Click, Event as InputEvent, HeldItem, ItemUse, Typed},
@@ -27,7 +28,7 @@ pub use bindings::horizon::mods::{
 use bindings::{
     HorizonMod,
     exports::horizon::mods::events::Registration,
-    horizon::mods::{chat, game, hud, input, log as mod_log, render, storage, ui, world},
+    horizon::mods::{atlas, chat, game, hud, input, log as mod_log, render, storage, ui, world},
 };
 
 /// A mod's linear memory cap.
@@ -84,10 +85,26 @@ pub const COLUMNS_MAX: usize = 1 << 16;
 pub const COLUMN_BLOCKS: u32 = 64;
 pub const COLUMNS_BLOCKS_MAX: usize = 1 << 20;
 const COLUMNS_KEPT: usize = 16;
+/// `atlas.block-sprites` and `atlas.texture-sprites`: the names one call may ask about (the rest are none), and the
+/// longest name looked up.
+pub const ATLAS_NAMES: usize = 4096;
+const ATLAS_NAME_CHARS: usize = 256;
 /// How far `world.raycast` sees: through the loaded chunks, then across the distant terrain (LOD Distance).
 pub const RAYCAST_MAX: f32 = 1024.0;
 /// The fastest flying speed `world.set-flying-speed` gives (vanilla's is 0.05).
 pub const FLYING_SPEED_MAX: f32 = 50.0;
+
+/// Where the game's block textures are (capability `atlas`), for `atlas.block-sprites`: the game gives one with
+/// [`Mods::set_atlas`] (or [`Mods::load_with_atlas`]) and again whenever its resources load anew. Called on the
+/// game's thread during a mod's call, so keep each answer quick (a model's faces, not a scan of every block).
+pub trait AtlasLookup: Send + Sync {
+    /// What block `name` (`minecraft:oak_log[axis=x]`) draws; none for one the game doesn't know.
+    fn block(&self, name: &str) -> Option<BlockFaces>;
+    /// Texture `name`'s sprite (`minecraft:block/stone`); none for one the arrays don't hold.
+    fn texture(&self, name: &str) -> Option<Sprite>;
+    /// Changes whenever the textures are loaded again; 0 for none loaded.
+    fn version(&self) -> u64;
+}
 
 /// What mods may read of the game, copied once per tick by the game.
 #[derive(Clone, Debug, Default)]
@@ -171,6 +188,8 @@ pub struct Post {
     pub params: [f32; POST_PARAMS],
     /// `render.set-data`'s words, and a version that changes with them (none: never set, or cleared).
     pub data: Option<(Arc<[u32]>, u64)>,
+    /// The mod has capability `atlas`: the pass is given the block sprite arrays (bindings 8 to 16).
+    pub atlas: bool,
 }
 
 /// A mod's text panel, drawn every frame until it changes.
@@ -246,6 +265,8 @@ struct State {
     columns: Vec<ColumnBlocks>,
     /// Capability `world`: the flying speed it wants the player to have.
     flying_speed: Option<f32>,
+    /// Capability `atlas`: where the game's block textures are (none until the game gives them).
+    atlas: Option<Arc<dyn AtlasLookup>>,
     /// Feature `fuel-trace` (the soak harness): the call's fuel, and what was left of it as the mod last called the
     /// game; a log line from the mod starting `fuel:` says how much the call had used by then.
     #[cfg(feature = "fuel-trace")]
@@ -264,6 +285,8 @@ pub struct Mods {
     out: Vec<Output>,
     /// The cursor over a mod's open screen, from its centre.
     cursor: Option<(f32, f32)>,
+    /// Where the game's block textures are (capability `atlas`).
+    atlas: Option<Arc<dyn AtlasLookup>>,
 }
 
 impl Mods {
@@ -275,7 +298,19 @@ impl Mods {
         enabled: impl Fn(&str) -> bool,
         reserved: impl Fn(&str) -> bool,
     ) -> Mods {
-        let mut mods = Mods::default();
+        Self::load_with_atlas(paths, enabled, reserved, None)
+    }
+    /// [`Mods::load`], the mods' `atlas` calls answered by `atlas` from their `init` on.
+    pub fn load_with_atlas(
+        paths: &[PathBuf],
+        enabled: impl Fn(&str) -> bool,
+        reserved: impl Fn(&str) -> bool,
+        atlas: Option<Arc<dyn AtlasLookup>>,
+    ) -> Mods {
+        let mut mods = Mods {
+            atlas,
+            ..Mods::default()
+        };
         for path in paths {
             let modified = modified(path);
             let mut entry = Entry {
@@ -365,6 +400,7 @@ impl Mods {
             .flat_map(|r| r.hooks.commands.iter().cloned())
             .collect();
         let snapshot = self.snapshot.clone();
+        let atlas = self.atlas.clone();
         let (engine, linker) = self.engine()?;
         let component =
             Component::new(engine, wasm).map_err(|e| format!("not a component: {e}"))?;
@@ -403,6 +439,7 @@ impl Mods {
             surface: Vec::new(),
             columns: Vec::new(),
             flying_speed: None,
+            atlas,
             #[cfg(feature = "fuel-trace")]
             fuel_call: FUEL_INIT,
             #[cfg(feature = "fuel-trace")]
@@ -447,6 +484,11 @@ impl Mods {
     pub fn entries(&self) -> &[Entry] {
         &self.entries
     }
+    /// Where the game's block textures are, for the mods' `atlas` calls from their next call on (none: every
+    /// answer none). Give it again when the game's resources load anew.
+    pub fn set_atlas(&mut self, atlas: Option<Arc<dyn AtlasLookup>>) {
+        self.atlas = atlas;
+    }
     /// What mods read until the next snapshot.
     pub fn set_snapshot(&mut self, snapshot: Snapshot) {
         self.snapshot = Arc::new(snapshot);
@@ -482,6 +524,7 @@ impl Mods {
         let entry = &mut self.entries[i];
         let run = entry.run.as_mut()?;
         run.store.data_mut().snapshot = self.snapshot.clone();
+        run.store.data_mut().atlas.clone_from(&self.atlas);
         run.store.data_mut().storage_budget = STORAGE_WRITE_BUDGET;
         let screen_open = run.store.data().screen.is_some();
         run.store.data_mut().cursor = self
@@ -718,6 +761,10 @@ impl Mods {
                 version,
                 params: s.post_params?,
                 data: s.post_data.clone(),
+                atlas: e
+                    .manifest
+                    .as_ref()
+                    .is_some_and(|m| m.capabilities.contains(&crate::Capability::Atlas)),
             })
         })
     }
@@ -1040,6 +1087,34 @@ impl render::Host for State {
         }
     }
 }
+impl atlas::Host for State {
+    fn block_sprites(&mut self, names: Vec<String>) -> Vec<Option<BlockFaces>> {
+        let atlas = self.atlas.as_deref();
+        names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                let atlas = atlas.filter(|_| i < ATLAS_NAMES && name.len() <= ATLAS_NAME_CHARS)?;
+                atlas.block(name)
+            })
+            .collect()
+    }
+    fn texture_sprites(&mut self, names: Vec<String>) -> Vec<Option<Sprite>> {
+        let atlas = self.atlas.as_deref();
+        names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                let atlas = atlas.filter(|_| i < ATLAS_NAMES && name.len() <= ATLAS_NAME_CHARS)?;
+                atlas.texture(name)
+            })
+            .collect()
+    }
+    fn resources_version(&mut self) -> u64 {
+        self.atlas.as_ref().map_or(0, |a| a.version())
+    }
+}
+
 impl world::Host for State {
     fn raycast(&mut self, distance: f32) -> Option<Hit> {
         let max = distance.clamp(0.0, RAYCAST_MAX);
