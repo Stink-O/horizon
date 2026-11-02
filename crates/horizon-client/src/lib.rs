@@ -18,6 +18,7 @@ pub mod benchmark;
 pub mod biome;
 pub mod block_edit;
 pub mod block_entities;
+pub mod block_sprites;
 pub mod block_entity_anim;
 pub mod block_entity_item;
 pub mod block_entity_nbt;

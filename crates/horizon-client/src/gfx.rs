@@ -527,7 +527,7 @@ pub struct Renderer {
 pub(crate) const SPRITE_SPLIT: u32 = 2048;
 /// [`SPRITE_SPLIT`], or a smaller split from `HORIZON_SPRITE_SPLIT` (dev
 /// only: vanilla's sprites drawn from several arrays must look the same).
-fn sprite_split() -> u32 {
+pub(crate) fn sprite_split() -> u32 {
     std::env::var("HORIZON_SPRITE_SPLIT")
         .ok()
         .and_then(|v| v.parse().ok())
