@@ -419,6 +419,7 @@ impl Soak {
                     block,
                 },
             )),
+            carried: true,
         }
     }
     fn after(&mut self, hook: &'static str, limit: u64) {

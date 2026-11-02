@@ -350,6 +350,17 @@ interface %world {
     /// Each component is clamped to -4..4 a call; a spectator, or a value
     /// that is not a number, is left alone.
     push-player: func(x: f32, y: f32, z: f32);
+    /// Carries the local player this tick: moves them by `x`, `y`, `z`
+    /// blocks through the game's own collision move in place of their own
+    /// motion (no gravity, no drag, their walking input left out, their
+    /// fall distance kept at nothing), drawn smoothly between ticks as a
+    /// ride is. Each component is clamped to -4..4. They break free by
+    /// flying (a double jump in creative flight toggles it as ever) or by
+    /// sneaking: that tick they move as their own, and the next call
+    /// answers false. True while the carries hold (and on the first call);
+    /// a spectator, someone riding, or a value that is not a number is left
+    /// alone and answers false.
+    carry-player: func(x: f32, y: f32, z: f32) -> bool;
     /// Which of a column's heights a run's `y` counts from (vanilla's
     /// heightmaps): one above the highest block that is not air, that blocks
     /// motion or holds a fluid, that does so and is not leaves, or that is

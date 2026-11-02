@@ -4208,16 +4208,25 @@ impl Game<'_> {
             [player.velocity.x, player.velocity.y, player.velocity.z],
             [player.position.x, player.position.y, player.position.z],
         );
+        // (a mod's carry, `world.carry-player`: their move this tick in place of their own, unless they break free)
+        let carry = self.mods.carry.take();
         if !riding {
-            MotionWorld {
+            let mut motion = MotionWorld {
                 entities: &entity_collisions,
                 player,
                 scene: &mut self.world,
                 assets: &self.pack.assets,
                 collision_binding: self.collision,
                 resources: self.motion,
+            };
+            let held = match carry {
+                Some([x, y, z]) => motion.carried_tick(keys, horizon_core::geometry::Vec3::new(f64::from(x), f64::from(y), f64::from(z)))?,
+                None => false,
+            };
+            if !held {
+                motion.controlled_simulation_tick(keys)?;
             }
-            .controlled_simulation_tick(keys)?;
+            self.mods.carry_refused = carry.is_some() && !held;
             // Player.jumpFromGround: the jump statistic.
             if grounded && keys.jump && !player.flying && player.velocity.y > 0.2 {
                 self.stats.custom("jump", 1);

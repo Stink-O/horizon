@@ -57,6 +57,10 @@ pub(super) struct ModsState {
     flying: Option<f32>,
     #[cfg(feature = "mods")]
     flying_sent: Option<u64>,
+    /// The carry a mod asked for this tick (`world.carry-player`), and whether the last one asked for held the
+    /// player (they broke free by flying or sneaking, or none was asked: `refused` false).
+    pub(super) carry: Option<[f32; 3]>,
+    pub(super) carry_refused: bool,
     /// Answers to the mods' `world.surface-height` queries, read on the world's thread, for their next tick.
     #[cfg(feature = "mods")]
     surface: std::sync::Arc<std::sync::Mutex<Vec<(String, horizon_mods::SurfaceHeights)>>>,
@@ -393,6 +397,7 @@ impl Game<'_> {
             clock,
             held,
             view_hit,
+            carried: !self.mods.carry_refused,
         }
     }
     /// The stack in inventory slot `slot` as mods see it.
@@ -621,6 +626,11 @@ impl Game<'_> {
                 }
                 // (the window's player moves itself, as vanilla's client does: an explosion's knockback is added
                 // to its motion here too)
+                // (a carry: the player's move this tick, made in the player's own tick: `Game::tick`)
+                Output::Carry { delta } => {
+                    self.mods.carry = Some(delta);
+                    continue;
+                }
                 Output::Push { velocity: [x, y, z] } => {
                     if let Some(p) = self.player.as_mut()
                         && !p.spectator

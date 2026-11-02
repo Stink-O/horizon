@@ -904,6 +904,37 @@ impl MotionWorld<'_, '_, '_> {
         self.player
             .food_tick(&self.resources.health, self.scene.health_rules)
     }
+    /// A mod's carry (`world.carry-player`): moved by `delta` through the collision move in place of their own
+    /// motion: no gravity, no drag, their walking left out, their fall distance kept at nothing. They break free by
+    /// sneaking or by flying (the double jump toggles creative flight as `player_movement_tick` does): false then, and
+    /// nothing done, for the normal tick to run. A spectator is never carried.
+    pub fn carried_tick(&mut self, keys: crate::sprint::Keys, delta: Vec3) -> Result<bool> {
+        if self.player.spectator {
+            return Ok(false);
+        }
+        if self.player.jump_trigger_time > 0 {
+            self.player.jump_trigger_time -= 1;
+        }
+        let was_jumping = std::mem::replace(&mut self.player.was_jumping, keys.jump);
+        if self.player.may_fly && !was_jumping && keys.jump && !self.player.was_auto_jump {
+            if self.player.jump_trigger_time == 0 {
+                self.player.jump_trigger_time = 7;
+            } else {
+                self.player.flying = !self.player.flying;
+                self.player.jump_trigger_time = 0;
+            }
+        }
+        if self.player.flying || keys.shift {
+            return Ok(false);
+        }
+        self.player.health.advance_clock();
+        self.player.old_position = self.player.position;
+        self.player.fall_distance = 0.0;
+        self.player.velocity = delta;
+        self.move_self(delta)?;
+        self.player.fall_distance = 0.0;
+        Ok(true)
+    }
     pub fn controlled_simulation_tick(&mut self, keys: crate::sprint::Keys) -> Result<()> {
         // The base tick (fluids, swimming) precedes LocalPlayer.aiStep.
         self.player.health.advance_clock();
@@ -2227,6 +2258,57 @@ mod tests {
         assert!(!p.is_sweep_attack(1.0, false, true));
         p.velocity = Vec3::new(f64::from(p.speed) * 2.5, 0.0, 0.0);
         assert!(!p.is_sweep_attack(1.0, false, true));
+    }
+
+    #[test]
+    fn a_mods_carry_moves_the_player_without_gravity_and_sneaking_or_flying_breaks_free() {
+        let root = std::env::var_os("HORIZON_TEST_RESOURCES")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../.local/horizon-client")
+                    .join(horizon_core::VANILLA_VERSION)
+            });
+        if !root.join("movement-properties.nbt").exists() {
+            eprintln!("skipped the carry: prepared resources unavailable");
+            return;
+        }
+        let assets = Assets::load(&root).unwrap();
+        let render = assets.reload(&root).unwrap();
+        let binding = crate::collisions::load(&root, assets.registry).unwrap();
+        let resources = MotionResources::load(&root, &assets).unwrap();
+        let mut scene = World::test_scene(&assets, &render, 1).unwrap();
+        let entities: [Aabb; 0] = [];
+        let mut player = PlayerMotion::new(&resources, Vec3::new(12.0, 120.0, 12.0)).unwrap();
+        player.may_fly = true;
+        let mut carry = |player: &mut PlayerMotion, keys, d: Vec3| {
+            MotionWorld {
+                entities: &entities,
+                player,
+                scene: &mut scene,
+                assets: &assets,
+                collision_binding: &binding,
+                resources: &resources,
+            }
+            .carried_tick(keys, d)
+            .unwrap()
+        };
+        // (carried up and along in the air: exactly the carry's move, no gravity, no fall distance)
+        for _ in 0..20 {
+            assert!(carry(&mut player, Default::default(), Vec3::new(0.5, 0.25, 0.0)));
+        }
+        assert!((player.position.x - 22.0).abs() < 1e-6 && (player.position.y - 125.0).abs() < 1e-6, "{:?}", player.position);
+        assert_eq!(player.fall_distance, 0.0);
+        // (sneaking breaks free: nothing done that tick)
+        let sneak = crate::sprint::Keys { shift: true, ..Default::default() };
+        assert!(!carry(&mut player, sneak, Vec3::new(0.5, 0.0, 0.0)));
+        assert!((player.position.x - 22.0).abs() < 1e-6);
+        // (a double jump toggles flight as ever: breaks free)
+        let jump = crate::sprint::Keys { jump: true, ..Default::default() };
+        assert!(carry(&mut player, jump, Vec3::ZERO));
+        assert!(carry(&mut player, Default::default(), Vec3::ZERO));
+        assert!(!carry(&mut player, jump, Vec3::ZERO));
+        assert!(player.flying);
     }
 
     #[test]

@@ -201,6 +201,7 @@ fn play(path: &Path, report: &mut Report) -> Result<(), String> {
             // Nothing in hand, nothing in view: the check runs the mod's hooks, not its items.
             held: None,
             view_hit: None,
+            carried: true,
         });
         mods.tick(t);
         for _ in 0..FRAMES_PER_TICK {
@@ -228,6 +229,7 @@ fn play(path: &Path, report: &mut Report) -> Result<(), String> {
                 format!("camera shake: {strength} for {seconds} s")
             }
             Output::Push { velocity } => format!("player pushed: {velocity:?}"),
+            Output::Carry { delta } => format!("player carried: {delta:?}"),
             Output::Edit { .. } => "block edit".to_owned(),
             Output::Surface { .. } => "surface heights asked".to_owned(),
             Output::Columns { .. } => "columns read".to_owned(),

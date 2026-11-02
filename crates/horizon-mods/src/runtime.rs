@@ -116,6 +116,8 @@ pub struct Snapshot {
     /// The first block along the view within `RAYCAST_MAX`, and its
     /// distance (capability `world`).
     pub view_hit: Option<(f32, Hit)>,
+    /// Whether the last `world.carry-player` held the player (true when none was asked: the next holds).
+    pub carried: bool,
 }
 
 /// What mods asked the game to show since the last [`Mods::drain`].
@@ -165,6 +167,8 @@ pub enum Output {
     Shake { strength: f32, seconds: f32 },
     /// `world.push-player`: added to the local player's velocity, blocks a tick.
     Push { velocity: [f32; 3] },
+    /// `world.carry-player`: the local player moved by this this tick in place of their own motion.
+    Carry { delta: [f32; 3] },
 }
 
 /// A keybind a mod registered (capability `input`).
@@ -1238,6 +1242,16 @@ impl world::Host for State {
                 velocity: [x.clamp(-4.0, 4.0), y.clamp(-4.0, 4.0), z.clamp(-4.0, 4.0)],
             });
         }
+    }
+    fn carry_player(&mut self, x: f32, y: f32, z: f32) -> bool {
+        if !(x.is_finite() && y.is_finite() && z.is_finite()) {
+            return false;
+        }
+        self.out.retain(|o| !matches!(o, Output::Carry { .. }));
+        self.out.push(Output::Carry {
+            delta: [x.clamp(-4.0, 4.0), y.clamp(-4.0, 4.0), z.clamp(-4.0, 4.0)],
+        });
+        self.snapshot.carried
     }
     fn set_flying_speed(&mut self, speed: Option<f32>) {
         self.flying_speed = speed
