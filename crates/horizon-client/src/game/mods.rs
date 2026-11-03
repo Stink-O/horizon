@@ -61,6 +61,8 @@ pub(super) struct ModsState {
     /// player (they broke free by flying or sneaking, or none was asked: `refused` false).
     pub(super) carry: Option<[f32; 3]>,
     pub(super) carry_refused: bool,
+    /// Whether a carry was asked for the tick before (none: the next one asked picks the player up afresh).
+    pub(super) carry_asked: bool,
     /// Answers to the mods' `world.surface-height` queries, read on the world's thread, for their next tick.
     #[cfg(feature = "mods")]
     surface: std::sync::Arc<std::sync::Mutex<Vec<(String, horizon_mods::SurfaceHeights)>>>,

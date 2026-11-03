@@ -907,10 +907,16 @@ impl MotionWorld<'_, '_, '_> {
     /// A mod's carry (`world.carry-player`): moved by `delta` through the collision move in place of their own
     /// motion: no gravity, no drag, their walking left out, their fall distance kept at nothing. They break free by
     /// sneaking or by flying (the double jump toggles creative flight as `player_movement_tick` does): false then, and
-    /// nothing done, for the normal tick to run. A spectator is never carried.
-    pub fn carried_tick(&mut self, keys: crate::sprint::Keys, delta: Vec3) -> Result<bool> {
+    /// nothing done, for the normal tick to run. A spectator is never carried. `fresh`: the first tick of a carry (none
+    /// asked the tick before): a player already in creative flight is taken out of it and carried, for breaking free
+    /// is starting to fly (or sneaking) while carried, not having been flying before it.
+    pub fn carried_tick(&mut self, keys: crate::sprint::Keys, delta: Vec3, fresh: bool) -> Result<bool> {
         if self.player.spectator {
             return Ok(false);
+        }
+        if fresh {
+            self.player.flying = false;
+            self.player.jump_trigger_time = 0;
         }
         if self.player.jump_trigger_time > 0 {
             self.player.jump_trigger_time -= 1;
@@ -2281,7 +2287,7 @@ mod tests {
         let entities: [Aabb; 0] = [];
         let mut player = PlayerMotion::new(&resources, Vec3::new(12.0, 120.0, 12.0)).unwrap();
         player.may_fly = true;
-        let mut carry = |player: &mut PlayerMotion, keys, d: Vec3| {
+        let mut carry = |player: &mut PlayerMotion, keys, d: Vec3, fresh: bool| {
             MotionWorld {
                 entities: &entities,
                 player,
@@ -2290,24 +2296,30 @@ mod tests {
                 collision_binding: &binding,
                 resources: &resources,
             }
-            .carried_tick(keys, d)
+            .carried_tick(keys, d, fresh)
             .unwrap()
         };
-        // (carried up and along in the air: exactly the carry's move, no gravity, no fall distance)
-        for _ in 0..20 {
-            assert!(carry(&mut player, Default::default(), Vec3::new(0.5, 0.25, 0.0)));
+        // (picked up in creative flight: taken out of it and carried, up and along in the air: exactly the carry's
+        // move, no gravity, no fall distance)
+        player.flying = true;
+        for n in 0..20 {
+            assert!(carry(&mut player, Default::default(), Vec3::new(0.5, 0.25, 0.0), n == 0));
+            assert!(!player.flying);
         }
         assert!((player.position.x - 22.0).abs() < 1e-6 && (player.position.y - 125.0).abs() < 1e-6, "{:?}", player.position);
         assert_eq!(player.fall_distance, 0.0);
         // (sneaking breaks free: nothing done that tick)
         let sneak = crate::sprint::Keys { shift: true, ..Default::default() };
-        assert!(!carry(&mut player, sneak, Vec3::new(0.5, 0.0, 0.0)));
+        assert!(!carry(&mut player, sneak, Vec3::new(0.5, 0.0, 0.0), false));
         assert!((player.position.x - 22.0).abs() < 1e-6);
         // (a double jump toggles flight as ever: breaks free)
         let jump = crate::sprint::Keys { jump: true, ..Default::default() };
-        assert!(carry(&mut player, jump, Vec3::ZERO));
-        assert!(carry(&mut player, Default::default(), Vec3::ZERO));
-        assert!(!carry(&mut player, jump, Vec3::ZERO));
+        assert!(carry(&mut player, jump, Vec3::ZERO, false));
+        assert!(carry(&mut player, Default::default(), Vec3::ZERO, false));
+        assert!(!carry(&mut player, jump, Vec3::ZERO, false));
+        assert!(player.flying);
+        // (and stays free while the mod, not yet told, asks on: only a carry after a tick with none takes them again)
+        assert!(!carry(&mut player, Default::default(), Vec3::ZERO, false));
         assert!(player.flying);
     }
 

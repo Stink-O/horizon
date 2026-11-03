@@ -4210,6 +4210,8 @@ impl Game<'_> {
         );
         // (a mod's carry, `world.carry-player`: their move this tick in place of their own, unless they break free)
         let carry = self.mods.carry.take();
+        // (a carry asked after a tick with none picks the player up afresh: out of creative flight if they were in it)
+        let fresh = !std::mem::replace(&mut self.mods.carry_asked, carry.is_some());
         if !riding {
             let mut motion = MotionWorld {
                 entities: &entity_collisions,
@@ -4220,7 +4222,7 @@ impl Game<'_> {
                 resources: self.motion,
             };
             let held = match carry {
-                Some([x, y, z]) => motion.carried_tick(keys, horizon_core::geometry::Vec3::new(f64::from(x), f64::from(y), f64::from(z)))?,
+                Some([x, y, z]) => motion.carried_tick(keys, horizon_core::geometry::Vec3::new(f64::from(x), f64::from(y), f64::from(z)), fresh)?,
                 None => false,
             };
             if !held {
