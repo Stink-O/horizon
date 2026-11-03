@@ -46,6 +46,9 @@ interface game {
     get-player: func() -> option<player>;
     /// None on the title screen.
     get-clock: func() -> option<clock>;
+    /// Whether the local player is flying (creative flight, or a spectator), as the game has them this tick; false
+    /// on the title screen.
+    player-flying: func() -> bool;
 }
 
 /// Capability `chat`: messages only the local player sees.
@@ -354,13 +357,23 @@ interface %world {
     /// blocks through the game's own collision move in place of their own
     /// motion (no gravity, no drag, their walking input left out, their
     /// fall distance kept at nothing), drawn smoothly between ticks as a
-    /// ride is. Each component is clamped to -4..4. They break free by
-    /// flying (a double jump in creative flight toggles it as ever) or by
-    /// sneaking: that tick they move as their own, and the next call
-    /// answers false. True while the carries hold (and on the first call);
-    /// a spectator, someone riding, or a value that is not a number is left
-    /// alone and answers false.
-    carry-player: func(x: f32, y: f32, z: f32) -> bool;
+    /// ride is, and turns their view by `turn` degrees of yaw over the tick
+    /// (spread over its frames; clamped to -6..6, 0 to leave it alone).
+    /// Each component is clamped to -4..4. Out of creative flight and any
+    /// glide while carried; jumping, a double jump or a tap of sneak do
+    /// nothing. They break free only by holding sneak for half a second (10
+    /// ticks running): that tick they move as their own, and the next call
+    /// answers false; they stay free until a tick with no carry asked. Let
+    /// go (broken free, or no carry asked the tick after one), they keep
+    /// only a little of the carry's motion and, if they may fly and are off
+    /// the ground, are put back into creative flight; unless the mod threw
+    /// them: a `push-player` while carried is kept as the throw, and the
+    /// first tick with no carry asked lets them go with exactly that
+    /// velocity, out of flight, their fall distance counted from there.
+    /// True while the
+    /// carries hold (and on the first call); a spectator, someone riding,
+    /// or a value that is not a number is left alone and answers false.
+    carry-player: func(x: f32, y: f32, z: f32, turn: f32) -> bool;
     /// Which of a column's heights a run's `y` counts from (vanilla's
     /// heightmaps): one above the highest block that is not air, that blocks
     /// motion or holds a fluid, that does so and is not leaves, or that is

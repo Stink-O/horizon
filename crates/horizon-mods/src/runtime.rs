@@ -118,6 +118,8 @@ pub struct Snapshot {
     pub view_hit: Option<(f32, Hit)>,
     /// Whether the last `world.carry-player` held the player (true when none was asked: the next holds).
     pub carried: bool,
+    /// Whether the local player flies (creative flight, or a spectator): `game.player-flying`.
+    pub flying: bool,
 }
 
 /// What mods asked the game to show since the last [`Mods::drain`].
@@ -167,8 +169,9 @@ pub enum Output {
     Shake { strength: f32, seconds: f32 },
     /// `world.push-player`: added to the local player's velocity, blocks a tick.
     Push { velocity: [f32; 3] },
-    /// `world.carry-player`: the local player moved by this this tick in place of their own motion.
-    Carry { delta: [f32; 3] },
+    /// `world.carry-player`: the local player moved by `delta` this tick in place of their own motion, their view
+    /// turned by `turn` degrees (yaw) over the tick.
+    Carry { delta: [f32; 3], turn: f32 },
 }
 
 /// A keybind a mod registered (capability `input`).
@@ -895,6 +898,9 @@ impl game::Host for State {
     fn get_clock(&mut self) -> Option<Clock> {
         self.snapshot.clock
     }
+    fn player_flying(&mut self) -> bool {
+        self.snapshot.flying
+    }
 }
 impl chat::Host for State {
     fn show(&mut self, text: String) {
@@ -1243,13 +1249,14 @@ impl world::Host for State {
             });
         }
     }
-    fn carry_player(&mut self, x: f32, y: f32, z: f32) -> bool {
+    fn carry_player(&mut self, x: f32, y: f32, z: f32, turn: f32) -> bool {
         if !(x.is_finite() && y.is_finite() && z.is_finite()) {
             return false;
         }
         self.out.retain(|o| !matches!(o, Output::Carry { .. }));
         self.out.push(Output::Carry {
             delta: [x.clamp(-4.0, 4.0), y.clamp(-4.0, 4.0), z.clamp(-4.0, 4.0)],
+            turn: if turn.is_finite() { turn.clamp(-6.0, 6.0) } else { 0.0 },
         });
         self.snapshot.carried
     }

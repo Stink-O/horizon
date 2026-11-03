@@ -420,6 +420,7 @@ impl Soak {
                 },
             )),
             carried: true,
+            flying: false,
         }
     }
     fn after(&mut self, hook: &'static str, limit: u64) {

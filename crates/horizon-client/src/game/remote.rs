@@ -3307,16 +3307,25 @@ impl Game<'_> {
         } else if !dead && !riding {
             player.client_side = true;
             player.velocity = player.velocity.add_vector(pushed);
-            MotionWorld {
+            // (or carried by a mod's carry, `world.carry-player`, as `Game::tick` has it)
+            let mut motion = MotionWorld {
                 entities: &entity_collisions,
                 player,
                 scene: &mut self.world,
                 assets: &self.pack.assets,
                 collision_binding: self.collision,
                 resources: self.motion,
-            }
-            .controlled_simulation_tick(keys)?;
+            };
+            self.mods.player_tick(&mut motion, keys)?;
+        } else {
+            // (sleeping, dead or riding: no carry holds them)
+            self.mods.carry = None;
+            self.mods.carry_refused = false;
+            self.mods.carry_turn = 0.0;
         }
+        let Some(player) = self.player.as_mut() else {
+            return Ok(());
+        };
         // LocalPlayer.onUpdateAbilities: flight turned on or off (a double
         // jump, a spectator, landing) is sent to the server.
         let flying = player.flying;

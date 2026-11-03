@@ -57,12 +57,14 @@ pub(super) struct ModsState {
     flying: Option<f32>,
     #[cfg(feature = "mods")]
     flying_sent: Option<u64>,
-    /// The carry a mod asked for this tick (`world.carry-player`), and whether the last one asked for held the
-    /// player (they broke free by flying or sneaking, or none was asked: `refused` false).
-    pub(super) carry: Option<[f32; 3]>,
+    /// The carry a mod asked for this tick (`world.carry-player`: the move, and the turn of the view in degrees),
+    /// whether the last one asked for held the player (they broke free, or none was asked: `refused` false), what
+    /// the carry keeps from tick to tick, and the turn of the view while it holds (degrees a tick, spread over the
+    /// frames).
+    pub(super) carry: Option<([f32; 3], f32)>,
     pub(super) carry_refused: bool,
-    /// Whether a carry was asked for the tick before (none: the next one asked picks the player up afresh).
-    pub(super) carry_asked: bool,
+    pub(super) carry_state: horizon_client::motion::CarryState,
+    pub(super) carry_turn: f32,
     /// Answers to the mods' `world.surface-height` queries, read on the world's thread, for their next tick.
     #[cfg(feature = "mods")]
     surface: std::sync::Arc<std::sync::Mutex<Vec<(String, horizon_mods::SurfaceHeights)>>>,
@@ -74,6 +76,27 @@ pub(super) struct ModsState {
     atlas: Option<(std::sync::Arc<horizon_client::streaming::WorkerContext>, u64)>,
 }
 impl ModsState {
+    /// The local player's tick, as both the game's own tick (`Game::tick`) and a connected one (single player's
+    /// included: `tick_remote_level`) make it: carried by a mod's carry (`world.carry-player`) if one was asked and
+    /// holds them (`MotionWorld::carry_step`), else their own motion; the answer for the mod's next call and the turn
+    /// of the view the frames draw while it holds.
+    pub(super) fn player_tick(
+        &mut self,
+        motion: &mut horizon_client::motion::MotionWorld<'_, '_, '_>,
+        keys: horizon_client::sprint::Keys,
+    ) -> horizon_client::Result<()> {
+        let carry = self.carry.take();
+        let delta = carry.map(|([x, y, z], _)| {
+            horizon_core::geometry::Vec3::new(f64::from(x), f64::from(y), f64::from(z))
+        });
+        let held = motion.carry_step(keys, delta, &mut self.carry_state)?;
+        self.carry_refused = carry.is_some() && !held;
+        self.carry_turn = carry.filter(|_| held).map_or(0.0, |(_, turn)| turn);
+        if !held {
+            motion.controlled_simulation_tick(keys)?;
+        }
+        Ok(())
+    }
     /// The chat's command tree: vanilla's, plus the running mods' commands.
     pub(super) fn dispatcher(&self) -> &Dispatcher {
         #[cfg(feature = "mods")]
@@ -194,6 +217,7 @@ impl Game<'_> {
     pub(super) fn sync_mods(&mut self) {}
     pub(super) fn tick_mods(&mut self) {}
     pub(super) fn mods_frame(&mut self, _elapsed: Duration) {}
+    pub(super) fn carry_look(&mut self, _seconds: f32) {}
     pub(super) fn mod_command(&mut self, _command: &str) -> bool {
         false
     }
@@ -400,6 +424,7 @@ impl Game<'_> {
             held,
             view_hit,
             carried: !self.mods.carry_refused,
+            flying: self.player.as_ref().is_some_and(|p| p.flying || p.spectator),
         }
     }
     /// The stack in inventory slot `slot` as mods see it.
@@ -507,6 +532,14 @@ impl Game<'_> {
             }
         } else if let Some(player) = self.player.as_mut() {
             player.flying_speed = speed;
+        }
+    }
+    /// A mod's carry turns the view (`world.carry-player`'s `turn`, degrees a tick), spread over the frames so it
+    /// turns smoothly; a long frame (a hitch) turns it no more than a tenth of a second's worth.
+    pub(super) fn carry_look(&mut self, seconds: f32) {
+        let turn = self.mods.carry_turn;
+        if turn != 0.0 && self.screen == Screen::Playing && self.player.is_some() {
+            self.yaw += turn * seconds.min(0.1) * 20.0;
         }
     }
     /// Once per frame: the frame hook, and dev mods' rebuilds.
@@ -629,8 +662,13 @@ impl Game<'_> {
                 // (the window's player moves itself, as vanilla's client does: an explosion's knockback is added
                 // to its motion here too)
                 // (a carry: the player's move this tick, made in the player's own tick: `Game::tick`)
-                Output::Carry { delta } => {
-                    self.mods.carry = Some(delta);
+                Output::Carry { delta, turn } => {
+                    self.mods.carry = Some((delta, turn));
+                    continue;
+                }
+                // (a push while a carry holds them is its throw: what they are let go with, `carry_step`)
+                Output::Push { velocity: [x, y, z] } if self.mods.carry_state.holding() => {
+                    self.mods.carry_state.push(horizon_core::geometry::Vec3::new(f64::from(x), f64::from(y), f64::from(z)));
                     continue;
                 }
                 Output::Push { velocity: [x, y, z] } => {
@@ -1170,5 +1208,86 @@ mod atlas {
         fn version(&self) -> u64 {
             self.version
         }
+    }
+}
+
+#[cfg(test)]
+mod carry_tests {
+    use super::ModsState;
+    use horizon_client::{
+        assets::Assets,
+        motion::{MotionResources, MotionWorld, PlayerMotion},
+        sprint::Keys,
+        world::World,
+    };
+    use horizon_core::geometry::{Aabb, Vec3};
+
+    /// The player's tick both the game's own tick and a connected one (single player's: `tick_remote_level`) make:
+    /// a mod's carry moves them, answers held, turns the view while it holds; held sneak breaks free; none asked lets
+    /// go gently and their own motion runs again.
+    #[test]
+    fn the_players_tick_takes_a_mods_carry_on_either_path() {
+        let root = std::env::var_os("HORIZON_TEST_RESOURCES")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../.local/horizon-client")
+                    .join(horizon_core::VANILLA_VERSION)
+            });
+        if !root.join("movement-properties.nbt").exists() {
+            eprintln!("skipped the carry: prepared resources unavailable");
+            return;
+        }
+        let assets = Assets::load(&root).unwrap();
+        let render = assets.reload(&root).unwrap();
+        let binding = horizon_client::collisions::load(&root, assets.registry).unwrap();
+        let resources = MotionResources::load(&root, &assets).unwrap();
+        let mut scene = World::test_scene(&assets, &render, 1).unwrap();
+        let entities: [Aabb; 0] = [];
+        let mut player = PlayerMotion::new(&resources, Vec3::new(12.0, 120.0, 12.0)).unwrap();
+        player.may_fly = true;
+        player.flying = true;
+        let mut mods = ModsState::default();
+        let mut tick = |mods: &mut ModsState, player: &mut PlayerMotion, keys: Keys| {
+            let mut motion = MotionWorld {
+                entities: &entities,
+                player,
+                scene: &mut scene,
+                assets: &assets,
+                collision_binding: &binding,
+                resources: &resources,
+            };
+            mods.player_tick(&mut motion, keys).unwrap();
+        };
+        for n in 0..10 {
+            mods.carry = Some(([1.0, 0.5, 0.0], 1.5));
+            tick(&mut mods, &mut player, Keys::default());
+            assert!(mods.carry.is_none() && !mods.carry_refused && mods.carry_turn == 1.5, "tick {n}");
+            assert!(!player.flying);
+        }
+        assert!((player.position.x - 22.0).abs() < 1e-6 && (player.position.y - 125.0).abs() < 1e-6);
+        // (no carry asked: let go gently, back into creative flight, their own motion: the view no longer turned)
+        tick(&mut mods, &mut player, Keys::default());
+        assert!(!mods.carry_refused && mods.carry_turn == 0.0 && player.flying);
+        assert!(player.velocity.x.abs() < 0.5, "{:?}", player.velocity);
+        // (picked up again; sneak held half a second breaks free: refused, the view left alone)
+        let sneak = Keys { shift: true, ..Default::default() };
+        for n in 0..10 {
+            mods.carry = Some(([1.0, 0.0, 0.0], 1.5));
+            tick(&mut mods, &mut player, sneak);
+            assert_eq!(mods.carry_refused, n == 9, "tick {n}");
+        }
+        assert!(mods.carry_turn == 0.0 && player.flying);
+        // (thrown: a push while it holds them, then no carry: let go with exactly that, out of flight)
+        mods.carry = None;
+        tick(&mut mods, &mut player, Keys::default());
+        mods.carry = Some(([0.5, 0.5, 0.0], 0.0));
+        tick(&mut mods, &mut player, Keys::default());
+        assert!(mods.carry_state.holding());
+        mods.carry_state.push(Vec3::new(2.5, 1.2, 0.0));
+        tick(&mut mods, &mut player, Keys::default());
+        assert!(!player.flying && !mods.carry_refused);
+        // (their own motion ran from the throw: moved by it, then air drag and gravity)
+        assert!(player.velocity.x > 2.0 && player.velocity.y > 1.0 && player.velocity.y < 1.2, "{:?}", player.velocity);
     }
 }

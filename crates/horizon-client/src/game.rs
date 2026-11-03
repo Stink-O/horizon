@@ -4208,10 +4208,6 @@ impl Game<'_> {
             [player.velocity.x, player.velocity.y, player.velocity.z],
             [player.position.x, player.position.y, player.position.z],
         );
-        // (a mod's carry, `world.carry-player`: their move this tick in place of their own, unless they break free)
-        let carry = self.mods.carry.take();
-        // (a carry asked after a tick with none picks the player up afresh: out of creative flight if they were in it)
-        let fresh = !std::mem::replace(&mut self.mods.carry_asked, carry.is_some());
         if !riding {
             let mut motion = MotionWorld {
                 entities: &entity_collisions,
@@ -4221,18 +4217,17 @@ impl Game<'_> {
                 collision_binding: self.collision,
                 resources: self.motion,
             };
-            let held = match carry {
-                Some([x, y, z]) => motion.carried_tick(keys, horizon_core::geometry::Vec3::new(f64::from(x), f64::from(y), f64::from(z)), fresh)?,
-                None => false,
-            };
-            if !held {
-                motion.controlled_simulation_tick(keys)?;
-            }
-            self.mods.carry_refused = carry.is_some() && !held;
+            // (or carried by a mod's carry, `world.carry-player`)
+            self.mods.player_tick(&mut motion, keys)?;
             // Player.jumpFromGround: the jump statistic.
             if grounded && keys.jump && !player.flying && player.velocity.y > 0.2 {
                 self.stats.custom("jump", 1);
             }
+        } else {
+            // (riding: no carry holds them)
+            self.mods.carry = None;
+            self.mods.carry_refused = false;
+            self.mods.carry_turn = 0.0;
         }
         let events = std::mem::take(&mut player.events);
         let spin_hit = player.spin_hit.take();
@@ -11531,6 +11526,7 @@ impl ApplicationHandler for Game<'_> {
                     self.extras_retry()?;
                     self.apply_mouse_look();
                     self.pad_look(elapsed.as_secs_f32());
+                    self.carry_look(elapsed.as_secs_f32());
                     self.advance_flight();
                     let ticked = Instant::now();
                     let rendered = self.render()?;

@@ -202,6 +202,7 @@ fn play(path: &Path, report: &mut Report) -> Result<(), String> {
             held: None,
             view_hit: None,
             carried: true,
+            flying: false,
         });
         mods.tick(t);
         for _ in 0..FRAMES_PER_TICK {
@@ -229,7 +230,7 @@ fn play(path: &Path, report: &mut Report) -> Result<(), String> {
                 format!("camera shake: {strength} for {seconds} s")
             }
             Output::Push { velocity } => format!("player pushed: {velocity:?}"),
-            Output::Carry { delta } => format!("player carried: {delta:?}"),
+            Output::Carry { delta, turn } => format!("player carried: {delta:?}, turned {turn}"),
             Output::Edit { .. } => "block edit".to_owned(),
             Output::Surface { .. } => "surface heights asked".to_owned(),
             Output::Columns { .. } => "columns read".to_owned(),
