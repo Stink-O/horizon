@@ -45,6 +45,8 @@ pub struct FrameUniform {
     pub fog_color: [f32; 4],
     pub view_params: [f32; 4],
     pub mod_params: [[f32; 4]; 4],
+    /// What `camera_position` (f32) leaves out of where the camera is: its rounding, far from the world's origin.
+    pub camera_rest: [f32; 4],
 }
 
 /// The atlas's bindings: the first sprite array, the sampler, then the other arrays.

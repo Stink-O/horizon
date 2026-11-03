@@ -124,8 +124,9 @@ The game puts [`gfx/mod_post.wgsl`](../crates/horizon-client/src/gfx/mod_post.wg
   with `linear_sampler` and `nearest_sampler`;
 - `frame`, a uniform: the camera's `view`, `projection` and their inverses, `camera_position`, `resolution` (width,
   height and their reciprocals), `time` (seconds, frames, the time of day, the partial tick), `sun`, `sky_color`,
-  `fog_color`, `view_params` (near, far, render distance, vertical field of view) and the mod's sixteen
-  `mod_params`;
+  `fog_color`, `view_params` (near, far, render distance, vertical field of view), the mod's sixteen
+  `mod_params` and `camera_rest` (what `camera_position`'s f32 rounding leaves out: `(p - camera_position) -
+  camera_rest` is a far-off point's offset from the camera without the rounding's jitter);
 - `mod_data`, a read-only storage buffer of `u32` (binding 5): the words the mod gives with `render.set-data`, one
   word (0) until it gives some, so read `arrayLength(&mod_data)` before indexing it (`bitcast<f32>` for floats). For
   what does not fit in sixteen floats: per-object poses worked out by the mod, a model's triangles;

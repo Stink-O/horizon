@@ -30,7 +30,8 @@ struct Frame {
     camera_position: vec4<f32>,
     // width, height, 1 / width, 1 / height, of the world's picture in pixels
     resolution: vec4<f32>,
-    // seconds since the game started, the time of day (0 sunrise, 0.25 noon), the partial tick
+    // seconds since the game started, frames drawn, the time of day (0 sunrise, 0.25 noon), the partial tick (the one
+    // the camera is drawn at: a clock of the mod's whole ticks plus w / 20 seconds moves in step with the camera)
     time: vec4<f32>,
     // xyz: towards the sun, in the world; w: the sun's angle in radians
     sun: vec4<f32>,
@@ -40,6 +41,10 @@ struct Frame {
     view_params: vec4<f32>,
     // the sixteen floats the mod sets with render.set-params
     mod_params: array<vec4<f32>, 4>,
+    // xyz: what camera_position leaves out of where the camera is (its f32 rounding, up to 1/128 of a block 65,536
+    // out): for something far from the world's origin, (its position - camera_position) - camera_rest is where it is
+    // from the camera to well under a millimetre, the difference taken first so it is exact
+    camera_rest: vec4<f32>,
 }
 @group(0) @binding(0) var scene_color: texture_2d<f32>;
 @group(0) @binding(1) var scene_depth: texture_depth_2d;

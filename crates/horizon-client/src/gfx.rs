@@ -4025,6 +4025,10 @@ impl Renderer {
                         (frame.camera.z + f64::from(eye.z)) as f32,
                         0.0,
                     ],
+                    camera_rest: {
+                        let at = [frame.camera.x + f64::from(eye.x), frame.camera.y + f64::from(eye.y), frame.camera.z + f64::from(eye.z)];
+                        [(at[0] - f64::from(at[0] as f32)) as f32, (at[1] - f64::from(at[1] as f32)) as f32, (at[2] - f64::from(at[2] as f32)) as f32, 0.0]
+                    },
                     time: [0.0, 0.0, mp.day_fraction, mp.partial_tick],
                     sun: [sun.x, sun.y, sun.z, sun_angle],
                     sky_color: [sky[0], sky[1], sky[2], 1.0],
