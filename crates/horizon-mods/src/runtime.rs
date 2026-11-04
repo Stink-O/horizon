@@ -39,6 +39,8 @@ const FUEL_INIT: u64 = 2_000_000_000;
 const FUEL_TICK: u64 = 50_000_000;
 const FUEL_FRAME: u64 = 10_000_000;
 const FUEL_EVENT: u64 = 100_000_000;
+/// How many times a session brings back a mod that stopped while running.
+const MAX_RESTARTS: u32 = 3;
 /// A call that uses this fraction of its fuel or more (1/2) is logged: a mod near being stopped.
 const FUEL_WARN: u64 = 2;
 /// Chat lines a mod may show per call, HUD lines and their length.
@@ -232,6 +234,10 @@ pub struct Entry {
     pub fuel_last: u64,
     run: Option<Running>,
     modified: Option<SystemTime>,
+    /// Stopped while running (out of fuel, a panic), not refused at start: `restart_stopped` brings it back.
+    stopped: bool,
+    /// How many times `restart_stopped` has brought it back.
+    restarts: u32,
 }
 
 struct Running {
@@ -332,6 +338,8 @@ impl Mods {
                 fuel_last: 0,
                 run: None,
                 modified,
+                stopped: false,
+                restarts: 0,
             };
             match Package::read(path) {
                 Err(e) => entry.status = Status::Failed(e),
@@ -590,6 +598,7 @@ impl Mods {
                 });
                 entry.status = Status::Failed(reason);
                 entry.run = None;
+                entry.stopped = true;
                 None
             }
         }
@@ -787,6 +796,37 @@ impl Mods {
         self.entries
             .iter()
             .find_map(|e| e.run.as_ref()?.store.data().flying_speed)
+    }
+
+    /// Starts again the mods that stopped while running, up to `MAX_RESTARTS` times each (one that keeps stopping stays
+    /// stopped, its reason on the Mods page). A restart is a fresh instance: whatever it held in memory is gone, what it
+    /// kept in storage is not. The names of those that came back.
+    pub fn restart_stopped(&mut self, reserved: impl Fn(&str) -> bool) -> Vec<String> {
+        let mut back = Vec::new();
+        for i in 0..self.entries.len() {
+            if !self.entries[i].stopped || self.entries[i].restarts >= MAX_RESTARTS {
+                continue;
+            }
+            self.entries[i].stopped = false;
+            self.entries[i].restarts += 1;
+            let path = self.entries[i].path.clone();
+            let started = Package::read(&path).and_then(|p| self.start(&path, &p, &reserved));
+            let entry = &mut self.entries[i];
+            let id = entry.manifest.as_ref().map_or("?", |m| m.id.as_str()).to_string();
+            match started {
+                Ok(run) => {
+                    log::info!("Horizon: mod {id} restarted after stopping ({} of {MAX_RESTARTS})", entry.restarts);
+                    entry.run = run;
+                    entry.status = Status::Running;
+                    back.push(entry.manifest.as_ref().map_or(id, |m| m.name.clone()));
+                }
+                Err(e) => {
+                    log::warn!("Horizon: mod {id} did not restart: {e}");
+                    entry.status = Status::Failed(e);
+                }
+            }
+        }
+        back
     }
 
     /// Restarts the mods whose file changed since they loaded (mod

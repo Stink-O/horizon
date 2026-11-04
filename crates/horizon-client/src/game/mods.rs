@@ -42,6 +42,9 @@ pub(super) struct ModsState {
     /// When dev mods were last checked for a rebuild.
     #[cfg(feature = "mods")]
     checked: Option<Instant>,
+    /// When to bring back a mod that stopped while running.
+    #[cfg(feature = "mods")]
+    restart_at: Option<Instant>,
     /// The chat's command tree while a running mod owns commands.
     #[cfg(feature = "mods")]
     tree: Option<Dispatcher>,
@@ -557,6 +560,14 @@ impl Game<'_> {
                 self.system_message(Text::literal("Mods reloaded").with_color(text::GRAY));
             }
         }
+        if self.mods.restart_at.is_some_and(|t| Instant::now() >= t) {
+            self.mods.restart_at = None;
+            for name in self.mods.mods.restart_stopped(vanilla_command) {
+                self.system_message(Text::literal(format!("Mod {name} restarted")).with_color(text::GRAY));
+            }
+            self.list_mods();
+            self.sync_mod_commands();
+        }
         if !self.mods.mods.is_running() {
             return;
         }
@@ -692,7 +703,8 @@ impl Game<'_> {
                 Output::Stopped { name, reason } => {
                     self.list_mods();
                     self.sync_mod_commands();
-                    Text::literal(format!("Mod {name} stopped: {reason}")).with_color(text::RED)
+                    self.mods.restart_at = Some(Instant::now() + Duration::from_secs(1));
+                    Text::literal(format!("Mod {name} stopped: {reason}. Restarting it.")).with_color(text::RED)
                 }
             };
             // Not through system_message: a mod must not hear its own lines.
