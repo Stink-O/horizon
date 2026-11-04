@@ -1130,6 +1130,9 @@ fn select_creative_tab(
     clicks.skip_release();
 }
 
+/// A mod's world warp this frame (`Game::mod_world_warp`): its source and version, its parameters, its anchor, copies
+/// and their radius.
+type ModWorldWarp = (std::sync::Arc<str>, u64, [f32; 16], [f64; 3], u32, f32);
 /// A mod's post pass this frame (`Game::mod_post_pass`): its source, the source's version, its parameters, its
 /// data with the data's version, and whether it has the block sprite arrays (capability `atlas`).
 type ModPostPass = (
@@ -10136,7 +10139,17 @@ impl Game<'_> {
             self.shader_pack_inputs(camera, alpha as f32)
         };
         let mod_post = self.mod_post_pass();
+        let world_warp = self.mod_world_warp();
         let frame = Frame {
+            world_warp: world_warp.as_ref().map(|w| horizon_client::gfx::WorldWarp {
+                source: &w.0,
+                version: w.1,
+                params: w.2,
+                anchor: w.3,
+                copies: w.4,
+                radius: w.5,
+                partial_tick: alpha as f32,
+            }),
             mod_post: mod_post.as_ref().map(|(source, version, params, data, atlas, history)| {
                 horizon_client::gfx::ModPost {
                     source,
@@ -12803,6 +12816,7 @@ fn loading_frame(hud: &HudBatch) -> Frame<'_> {
         boss_darken: 0.0,
         menu_blur: None,
         mod_post: None,
+        world_warp: None,
     }
 }
 

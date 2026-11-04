@@ -346,6 +346,17 @@ fn post_data_is_kept_versioned_and_capped() {
 }
 
 #[test]
+fn a_world_warp_is_held_while_on_with_its_copies_capped() {
+    let mut mods = load("horizon_mods_test_guest.hmod");
+    assert!(mods.warp().is_none());
+    mods.command("warp fn world_warp");
+    let w = mods.warp().expect("the warp");
+    assert_eq!((&*w.source, w.anchor, w.copies, w.radius), ("fn world_warp", [1.0, 2.0, 3.0], horizon_mods::MAX_WARP_COPIES, 50.0));
+    mods.command("warp");
+    assert!(mods.warp().is_none());
+}
+
+#[test]
 fn a_history_is_asked_for_and_ended_with_the_pass() {
     let mut mods = load("horizon_mods_test_guest.hmod");
     mods.command("history off");

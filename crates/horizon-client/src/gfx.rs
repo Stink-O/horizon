@@ -68,6 +68,7 @@ mod flat;
 pub mod lightning;
 mod lod;
 mod mod_post;
+mod warp;
 mod occlusion;
 mod pack_atlas;
 mod pack_post;
@@ -159,6 +160,9 @@ struct Globals {
     outline_params: [f32; 4],
     /// Horizon Extras' dynamic lights: camera-relative position and level (`dynamic_light`).
     dynamic_lights: [[f32; 4]; crate::dynamic_light::MAX],
+    /// A mod's world warp (gfx/warp.rs): its sixteen floats; the camera (f32) and the partial tick; what the f32 left
+    /// out and 1 while on.
+    warp: [[f32; 4]; 6],
 }
 pub type SectionKey = (i32, i32, i32);
 struct SectionGpu {
@@ -287,7 +291,10 @@ pub struct Frame<'a> {
     pub menu_blur: Option<f32>,
     /// A mod's post-processing pass (capability `render`, gfx/mod_post.rs).
     pub mod_post: Option<ModPost<'a>>,
+    /// A mod's world warp (capability `render`, gfx/warp.rs).
+    pub world_warp: Option<WorldWarp<'a>>,
 }
+pub use warp::WorldWarp;
 /// A mod's post pass this frame: its WGSL (without `mod_post::PRELUDE`), a version that changes with it, and
 /// the parameters it reads as `frame.mod_params`.
 #[derive(Clone, Copy)]
@@ -497,6 +504,9 @@ pub struct Renderer {
     pack_atlas: Option<pack_atlas::PackAtlas>,
     /// A mod's post pass (capability `render`).
     mod_post: mod_post::ModPost,
+    warp_kit: warp::Kit,
+    warp: Option<warp::Pipelines>,
+    warp_refused: Option<u64>,
     pub hud: HudRenderer,
     /// Vanilla's menu background blur, made on first use.
     menu_blur: Option<crate::menu_blur::MenuBlur>,
@@ -2208,6 +2218,7 @@ impl Renderer {
             });
         let depth = Self::depth(&device, &config, cull.as_ref());
         let world_post = world_post::Post::new(&device, config.format.remove_srgb_suffix());
+        let warp_format = config.format.remove_srgb_suffix();
         let mut mod_post = mod_post::ModPost::new(&device, config.format.remove_srgb_suffix());
         // (a mod with capability `atlas` samples the terrain's own sprite arrays)
         mod_post.set_atlas(&sprite_views, &sprite_sampler);
@@ -2352,6 +2363,14 @@ impl Renderer {
             pack_post: None,
             pack_atlas: None,
             mod_post,
+            warp_kit: warp::Kit {
+                layout: layout.clone(),
+                entity_layout: entity_layout.clone(),
+                format: warp_format,
+                sprite_constants: [sprite_constants[0].1, sprite_constants[1].1],
+            },
+            warp: None,
+            warp_refused: None,
             hud,
             menu_blur: None,
             info,
@@ -3083,6 +3102,13 @@ impl Renderer {
                 },
             )
         };
+        // A mod's world warp: its pipelines in place of the terrain's and the entities', nothing culled by where it was
+        // (the warp moves what is drawn: what is out of view, hidden or facing away may not be).
+        let warp_on = frame
+            .world_warp
+            .as_ref()
+            .is_some_and(|w| !frame.title && self.prepare_warp(w));
+        let warp_uniform = frame.world_warp.as_ref().filter(|_| warp_on).map(|w| warp::uniform(w, frame.camera));
         let globals = Globals {
             view_proj: view_proj.to_cols_array_2d(),
             fog_color,
@@ -3124,6 +3150,7 @@ impl Renderer {
                 }
                 lights
             },
+            warp: warp_uniform.unwrap_or_default(),
         };
         self.uploads
             .buffer(&mut encoder, &self.globals, 0, bytemuck::bytes_of(&globals));
@@ -3160,14 +3187,14 @@ impl Renderer {
         );
         // Frustum culling and camera-relative origins.
         let view = Frustum {
-            planes: frustum(view_proj),
+            planes: if warp_on { [Vec4::new(0.0, 0.0, 0.0, 1.0); 6] } else { frustum(view_proj) },
         };
         let camera = frame.camera;
         let camera_section = camera_section(camera);
         // Solid quads facing away from the eye are left out: the bob moves
         // the eye off `camera`, so it is found from the projection.
-        let eye = projection_center(view_proj).filter(|_| self.sides_on);
-        let culling = !frame.title && frame.cave_culling;
+        let eye = projection_center(view_proj).filter(|_| self.sides_on && !warp_on);
+        let culling = !frame.title && frame.cave_culling && !warp_on;
         if culling {
             crate::spans::time("occlusion", || {
                 self.start_occlusion(camera, frame.detail_distance)
@@ -3199,8 +3226,11 @@ impl Renderer {
             );
             visible_lods.sort_unstable_by_key(|v| (v.distance, v.key));
         }
+        // The sections a warp draws again (`copies` times, each with its number in origin.w: vs_terrain).
+        let copied: Vec<usize> = frame.world_warp.as_ref().filter(|_| warp_on).map_or(Vec::new(), |w| warp::near(w, camera, &visible));
+        let copies = frame.world_warp.as_ref().filter(|_| !copied.is_empty()).map_or(0, |w| w.copies);
         self.drawn_sections = visible.len() + visible_lods.len();
-        let instances = self.drawn_sections;
+        let instances = self.drawn_sections + copied.len() * copies as usize;
         if instances as u64 > self.instance_capacity {
             self.instance_capacity = (instances as u64).next_power_of_two();
             self.instances = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -3217,7 +3247,13 @@ impl Renderer {
             visible
                 .iter()
                 .map(|v| section_instance(v.origin))
-                .chain(visible_lods.iter().map(|v| lod::instance(v.origin))),
+                .chain(visible_lods.iter().map(|v| lod::instance(v.origin)))
+                .chain((1..=copies).flat_map(|copy| {
+                    copied.iter().map(move |&i| i).map(move |i| (copy, i))
+                }).map(|(copy, i)| {
+                    let o = visible[i].origin;
+                    [o[0], o[1], o[2], copy as f32]
+                })),
         );
         if !self.origins.is_empty() {
             self.uploads.buffer(
@@ -3238,7 +3274,7 @@ impl Renderer {
             .cull
             .as_mut()
             .filter(|c| {
-                self.cull_on && !frame.title && self.multi_draw && visible.len() >= c.min_sections
+                self.cull_on && !frame.title && !warp_on && self.multi_draw && visible.len() >= c.min_sections
             })
             .and_then(|cull| cull.begin(&self.device).then_some(cull));
         self.phase2_draws.clear();
@@ -3309,6 +3345,24 @@ impl Renderer {
         }
         self.solid_runs
             .regroup(&mut self.draws, &mut self.draw_pages, tiles);
+        // A warp's copies, after everything else (their instances after the tiles').
+        let copy_start = self.draws.len();
+        self.solid_runs.clear();
+        for copy in 0..copies as usize {
+            for (n, &i) in copied.iter().enumerate() {
+                let (v, s) = (&visible[i], self.sections.get(visible[i].slot));
+                let instance = (visible.len() + visible_lods.len() + copy * copied.len() + n) as u32;
+                let start = self.draws.len();
+                facing_runs(&s.sides, None, v.origin, |first, quads| {
+                    let base = s.start as u32 + first * 4;
+                    self.draws.push([quads * 6, 1, 0, base, instance]);
+                    self.draw_pages.push((s.page, None));
+                });
+                self.solid_runs.push(v.distance, s.page, start, self.draws.len() - start, [0; 3]);
+            }
+        }
+        self.solid_runs
+            .regroup(&mut self.draws, &mut self.draw_pages, copy_start);
         let phase1_draws = self.draws.len() as u32;
         self.draws.extend_from_slice(&self.phase2_draws);
         self.draw_pages.extend_from_slice(&self.phase2_pages);
@@ -3719,6 +3773,7 @@ impl Renderer {
             cull.bind_depth(&self.device, world_depth);
         }
         let cull = self.cull.as_ref().filter(|_| culling && solid_draws > 0);
+        let warped = self.warp.as_ref().filter(|_| warp_on);
         {
             let attachments = [Some(wgpu::RenderPassColorAttachment {
                 view: world_view,
@@ -3823,7 +3878,7 @@ impl Renderer {
                     pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
                 }
                 None => {
-                    pass.set_pipeline(&self.solid);
+                    pass.set_pipeline(warped.map_or(&self.solid, |w| &w.solid));
                     pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
                     pass.set_vertex_buffer(1, self.instances.slice(..));
                     match cull {
@@ -3862,7 +3917,7 @@ impl Renderer {
                 }
             }
             if entity_quads > 0 {
-                pass.set_pipeline(&self.entity_pipeline);
+                pass.set_pipeline(warped.map_or(&self.entity_pipeline, |w| &w.entity));
                 pass.set_bind_group(0, &self.entity_group, &[]);
                 pass.set_vertex_buffer(0, self.entity_buffer.slice(..));
                 pass.draw_indexed(0..entity_quads * 6, 0, 0..1);
@@ -3939,7 +3994,7 @@ impl Renderer {
                     pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
                 }
                 None => {
-                    pass.set_pipeline(&self.translucent);
+                    pass.set_pipeline(warped.map_or(&self.translucent, |w| &w.translucent));
                     pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
                     pass.set_vertex_buffer(1, self.instances.slice(..));
                     self.draw_sections(

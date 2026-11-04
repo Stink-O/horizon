@@ -24,6 +24,9 @@ struct Globals {
     outline_params: vec4<f32>,
     // Horizon Extras' dynamic lights: camera-relative position and level (dynamic_light.rs).
     dynamic_lights: array<vec4<f32>, 16>,
+    // A mod's world warp (render.set-warp, gfx/warp.rs): the sixteen floats of render.set-params, then xyz the camera
+    // in the world (f32) and w the partial tick, then xyz what the f32 leaves out of it and w 1 while it is on.
+    warp: array<vec4<f32>, 6>,
 }
 @group(0) @binding(0) var<uniform> globals: Globals;
 @group(0) @binding(1) var sprites: texture_2d_array<f32>;
@@ -62,6 +65,15 @@ fn sprite(uv: vec2<f32>, layer: u32) -> vec4<f32> {
     }
 }
 
+// [world warp]
+// What a mod's world warp gives a vertex: where to draw it (camera-relative) and what to multiply its colour by
+// (red under 0: leave these faces out, to the pixel, as far as an edge of the face goes).
+struct Warped {
+    pos: vec3<f32>,
+    tint: vec3<f32>,
+}
+fn world_warp(pos: vec3<f32>, copy: u32) -> Warped { return Warped(pos, vec3<f32>(1.0)); }
+// [end world warp]
 struct TerrainOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) uv: vec2<f32>,
@@ -98,7 +110,10 @@ fn terrain_uv(packed: vec2<u32>, step: f32) -> vec2<f32> {
     @location(0) position: vec3<f32>, @location(1) uv: vec2<u32>,
     @location(2) layer: u32, @location(3) color: vec4<f32>, @location(4) light: vec2<u32>,
     @location(5) origin: vec4<f32>) -> TerrainOut {
-    return terrain_vertex(position, terrain_uv(uv, origin.w), layer, color, light, origin.xyz);
+    // A mod's world warp draws sections again: there origin.w is the copy's number (their UV step is a section's).
+    let copy = u32(max(origin.w, 0.0));
+    let step = select(origin.w, 1.0 / 32768.0, copy > 0u);
+    return terrain_vertex(position, terrain_uv(uv, step), layer, color, light, origin.xyz, copy);
 }
 // Flat section draws (gfx/flat.rs): one draw per arena page over the frame's
 // index list. A section's vertices fill whole 256-vertex blocks of its page:
@@ -111,17 +126,23 @@ fn terrain_uv(packed: vec2<u32>, step: f32) -> vec2<f32> {
     @location(2) layer: u32, @location(3) color: vec4<f32>, @location(4) light: vec2<u32>
 ) -> TerrainOut {
     let origin = slot_origins[block_slots[vertex >> 8u]];
-    return terrain_vertex(position, terrain_uv(uv, origin.w), layer, color, light, origin.xyz);
+    return terrain_vertex(position, terrain_uv(uv, origin.w), layer, color, light, origin.xyz, 0u);
 }
 fn terrain_vertex(position: vec3<f32>, uv: vec2<f32>, layer: u32, color: vec4<f32>,
-    light: vec2<u32>, origin: vec3<f32>) -> TerrainOut {
-    let pos = position + origin;
+    light: vec2<u32>, origin: vec3<f32>, copy: u32) -> TerrainOut {
+    let warped = world_warp(position + origin, copy);
+    let pos = warped.pos;
     var out: TerrainOut;
     out.clip = globals.view_proj * vec4(pos, 1.0);
     out.uv = uv;
     out.layer = layer;
     let block = max(f32(light.y), dynamic_block_light(pos));
-    out.color = color * sample_lightmap(f32(light.x) / 16.0, block / 16.0);
+    out.color = color * sample_lightmap(f32(light.x) / 16.0, block / 16.0) * vec4(warped.tint, 1.0);
+    // While a world warp is on the land is seen from any side: faces no light reaches (the rock's caves, sealed rooms) are
+    // left out, or from under it they would be all that shows. fs_solid drops a pixel by its alpha.
+    if globals.warp[5].w > 0.0 && light.x < 8u && light.y < 8u { out.color.a = 0.0; }
+    // (a tint under 0 leaves the vertex's faces out: a warp's way of cutting the land)
+    if warped.tint.r < 0.0 { out.color.a = 0.0; }
     out.spherical = length(pos);
     out.cylindrical = max(length(pos.xz), abs(pos.y));
     return out;

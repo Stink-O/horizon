@@ -229,6 +229,9 @@ impl Game<'_> {
     pub(super) fn mod_post_pass(&self) -> Option<super::ModPostPass> {
         None
     }
+    pub(super) fn mod_world_warp(&self) -> Option<super::ModWorldWarp> {
+        None
+    }
     pub(super) fn mod_use_start(&mut self) -> bool {
         false
     }
@@ -252,6 +255,10 @@ impl Game<'_> {
             .mods
             .post()
             .map(|p| (p.source, p.version, p.params, p.data, p.atlas, p.history))
+    }
+    /// A running mod's world warp, while it has it on.
+    pub(super) fn mod_world_warp(&self) -> Option<super::ModWorldWarp> {
+        self.mods.mods.warp().map(|w| (w.source, w.version, w.params, w.anchor, w.copies, w.radius))
     }
     /// Reads `horizon-mods/` and the dev mods, and starts the ones turned on.
     pub(super) fn start_mods(&mut self) {

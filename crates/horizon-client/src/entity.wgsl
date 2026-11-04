@@ -21,6 +21,8 @@ struct Globals {
     outline_params: vec4<f32>,
     // Horizon Extras' dynamic lights: camera-relative position and level (dynamic_light.rs).
     dynamic_lights: array<vec4<f32>, 16>,
+    // A mod's world warp (terrain.wgsl)
+    warp: array<vec4<f32>, 6>,
 }
 @group(0) @binding(0) var<uniform> globals: Globals;
 @group(0) @binding(1) var atlas: texture_2d<f32>;
@@ -73,9 +75,22 @@ fn dynamic_block_light(pos: vec3<f32>) -> f32 {
     }
     return level * 16.0;
 }
-fn entity_vertex(position: vec3<f32>, uv: vec2<f32>,
+// [world warp]
+// (as in terrain.wgsl)
+struct Warped {
+    pos: vec3<f32>,
+    tint: vec3<f32>,
+}
+fn world_warp(pos: vec3<f32>, copy: u32) -> Warped { return Warped(pos, vec3<f32>(1.0)); }
+// [end world warp]
+fn entity_vertex(at: vec3<f32>, uv: vec2<f32>,
     overlay: u32, color: vec4<f32>, light: vec4<u32>, normal: vec4<f32>) -> Out {
     var out: Out;
+    // (the sky's things stay where they are)
+    var position = at;
+    if overlay < 2u || overlay > 4u {
+        position = world_warp(at, 0u).pos;
+    }
     out.clip = globals.view_proj * vec4(position, 1.0);
     out.proj = vec4(out.clip.xy * 0.5 + out.clip.w * 0.5, out.clip.zw);
     out.uv = uv;

@@ -314,6 +314,17 @@ interface render {
     /// for feedback, trails and temporal reprojection (docs/mods.md, "A history"). Costs one more picture of memory
     /// and a texture read; a pass that declares the binding without asking for it is refused (logged).
     set-history: func(on: bool);
+    /// Gives the game a world warp (empty: none): the WGSL `fn world_warp(pos: vec3<f32>, copy: u32) -> Warped`, which
+    /// takes the place of the identity every terrain vertex (the far terrain's tiles too) and entity vertex goes through.
+    /// `pos` is the vertex from the camera; `Warped` is `{ pos: vec3<f32>, tint: vec3<f32> }`, where to draw it from the
+    /// camera and what to multiply its colour by. It reads `globals.warp` (docs/mods.md, "A world warp"). It may be
+    /// any function of the position, so the mod can bend the real world, and is built when first turned on. It runs only
+    /// while `warp-on` holds it on.
+    set-warp: func(wgsl: string);
+    /// Turns the world warp on or off (off by default, and when the mod stops). While on, nothing is left out of a
+    /// frame by where it was: more is drawn. `copies` (at most 8) draws the solid sections within `radius` blocks of
+    /// (x, y, z) that many times more, each with its number (1 up) as the warp's `copy`.
+    warp-on: func(on: bool, x: f64, y: f64, z: f64, copies: u32, radius: f32);
     /// Shakes the camera: a jolt of `strength` (0 to 1, 1 the hardest) that
     /// fades out over `seconds` (at most 30). Jolts add up. The game turns
     /// the view (not the player) with smooth noise, scaled by the player's

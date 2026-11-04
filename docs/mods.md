@@ -577,3 +577,26 @@ Modpacks ([modpacks.md](modpacks.md)) move data-driven `registries` first:
 API 0.2 is content-only `.hmod`s (blocks, items, recipes, loot, models and
 textures), then server hooks (0.3) and block entities, menus, capabilities and
 `net` (0.4), in the order the ATM10 inventory needs them.
+
+## A world warp
+
+`render.set-warp` gives the game a WGSL function every terrain vertex (the far terrain's tiles too) and entity vertex goes
+through, for bending the real world rather than a picture of it:
+
+```wgsl
+fn world_warp(pos: vec3<f32>, copy: u32) -> Warped {
+    // pos: from the camera. Warped: { pos: vec3<f32> (from the camera), tint: vec3<f32> (multiplies the colour) }
+    return Warped(pos + vec3<f32>(0.0, sin(pos.x * 0.1) * globals.warp[0].x, 0.0), vec3<f32>(1.0));
+}
+```
+
+`globals.warp` is `array<vec4<f32>, 6>`: `[0..4]` the sixteen floats of `render.set-params`; `[4]` xyz the camera in the
+world as f32, w the partial tick; `[5]` xyz what the f32 leaves out, w 1. So `(a - warp[4].xyz) - warp[5].xyz` is where the
+world's point `a` is from the camera, exact far from the world's origin. The function goes in the terrain's and the
+entities' shaders: name what else you declare so it can't clash (a prefix). `render.warp-on` turns it on: the pipelines
+are built the first time (without back-face culling), and while it is on no section, tile or face is left out by the
+frustum, the cave culling or occlusion, because the warp may bring it into view, so the frame costs more. `copies` draws
+the solid sections near a point again with `copy` 1 up, so the mod can multiply a piece of the land. A tint with red
+under 0 leaves a vertex's faces out (cut at the pixel), and faces no light reaches (caves, the rock's insides) are left
+out while the warp is on. A warp that doesn't
+compile is logged ("a mod's world warp did not compile") and skipped.

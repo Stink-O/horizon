@@ -203,6 +203,20 @@ pub struct Post {
     pub history: bool,
 }
 
+/// The most times `render.warp-on` draws the land near its anchor again.
+pub const MAX_WARP_COPIES: u32 = 8;
+
+/// A mod's world warp, while it has it on (`render.set-warp`, `render.warp-on`).
+#[derive(Clone)]
+pub struct Warp {
+    pub source: Arc<str>,
+    pub version: u64,
+    pub params: [f32; POST_PARAMS],
+    pub anchor: [f64; 3],
+    pub copies: u32,
+    pub radius: f32,
+}
+
 /// A mod's text panel, drawn every frame until it changes.
 #[derive(Clone, Debug)]
 pub struct Panel {
@@ -275,6 +289,9 @@ struct State {
     post_params: Option<[f32; POST_PARAMS]>,
     post_data: Option<(Arc<[u32]>, u64)>,
     post_history: bool,
+    warp_source: Option<(Arc<str>, u64)>,
+    /// `render.warp-on`: the anchor, the copies, their radius.
+    warp_on: Option<([f64; 3], u32, f32)>,
     /// Capability `world`: answers to its `surface-height` queries, for its next `poll-surface-heights`.
     surface: Vec<SurfaceHeights>,
     /// Capability `world`: answers to its `read-columns` queries, for its next `poll-columns`.
@@ -455,6 +472,8 @@ impl Mods {
             post_params: None,
             post_data: None,
             post_history: false,
+            warp_source: None,
+            warp_on: None,
             surface: Vec::new(),
             columns: Vec::new(),
             flying_speed: None,
@@ -752,6 +771,15 @@ impl Mods {
             }
             queue.push(answer);
         }
+    }
+    /// The first running mod's world warp, while it has it on (with parameters: the post pass's).
+    pub fn warp(&self) -> Option<Warp> {
+        self.entries.iter().find_map(|e| {
+            let s = e.run.as_ref()?.store.data();
+            let (source, version) = s.warp_source.clone()?;
+            let (anchor, copies, radius) = s.warp_on?;
+            Some(Warp { source, version, params: s.post_params?, anchor, copies, radius })
+        })
     }
     /// What mod `id`'s screen draws, while it is open.
     pub fn screen(&self, id: &str) -> Option<&[Draw]> {
@@ -1115,6 +1143,23 @@ impl render::Host for State {
     }
     fn set_history(&mut self, on: bool) {
         self.post_history = on;
+    }
+    fn set_warp(&mut self, wgsl: String) {
+        if wgsl.len() > POST_SOURCE {
+            log::warn!("[mod {}] world warp over {} KiB, ignored", self.id, POST_SOURCE >> 10);
+            return;
+        }
+        if self.warp_source.as_ref().is_some_and(|(s, _)| **s == *wgsl) {
+            return;
+        }
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.id.hash(&mut h);
+        wgsl.hash(&mut h);
+        self.warp_source = (!wgsl.is_empty()).then(|| (Arc::from(wgsl), h.finish()));
+    }
+    fn warp_on(&mut self, on: bool, x: f64, y: f64, z: f64, copies: u32, radius: f32) {
+        self.warp_on = on.then_some(([x, y, z], copies.min(MAX_WARP_COPIES), radius.clamp(0.0, 1024.0)));
     }
     fn set_data(&mut self, words: Vec<u32>) {
         if words.len() > POST_DATA_WORDS {
