@@ -23,6 +23,12 @@
 //! (a 1-layer stand-in where the game has fewer). As with bindings 6 and 7 the pass declares them itself, so a pass
 //! that doesn't sample them compiles and runs everywhere; one that does is refused (logged) by a game without them,
 //! or for a mod without the capability.
+//!
+//! A mod that asked for a history (`render.set-history`) is also given its own previous picture, the pass's output
+//! of the frame before, at binding 17 (`history_picture`), and the previous frame's camera (`frame.previous_view`,
+//! `previous_projection`, `previous_camera_position`, whose w says whether the history is valid): feedback, trails
+//! and temporal reprojection. Two pictures swap each frame (the second is made the first time a history is asked
+//! for), so the cost is one more picture of memory and one more texture read.
 use bytemuck::{Pod, Zeroable};
 use std::time::{Duration, Instant};
 
@@ -47,7 +53,18 @@ pub struct FrameUniform {
     pub mod_params: [[f32; 4]; 4],
     /// What `camera_position` (f32) leaves out of where the camera is: its rounding, far from the world's origin.
     pub camera_rest: [f32; 4],
+    /// The previous frame's camera, for reprojecting `history_picture` (a pass with a history; else the current's).
+    pub previous_view: [[f32; 4]; 4],
+    pub previous_projection: [[f32; 4]; 4],
+    /// xyz: where the camera was the frame before; w: 1 when `history_picture` holds the pass's previous frame, 0
+    /// when it does not (the first frame, a gap of a quarter second or more since the pass last ran, a resize).
+    pub previous_camera_position: [f32; 4],
 }
+
+/// The history picture's binding.
+pub const HISTORY_BINDING: u32 = 17;
+/// A history older than this (the pass did not run for this long) is not valid.
+const HISTORY_MAX_AGE: Duration = Duration::from_millis(250);
 
 /// The atlas's bindings: the first sprite array, the sampler, then the other arrays.
 pub const ATLAS_ARRAY: u32 = 8;
@@ -62,6 +79,8 @@ const HALF_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 struct Output {
     size: [u32; 2],
     view: wgpu::TextureView,
+    /// With a history: the picture of the frame before (`view` and this swap each frame), and whether it was drawn.
+    spare: Option<wgpu::TextureView>,
     /// The half-size stage's pictures, made the first time a pass with one runs at this size.
     half: Option<[wgpu::TextureView; 2]>,
 }
@@ -191,12 +210,18 @@ struct Layouts {
 
 pub struct ModPost {
     format: wgpu::TextureFormat,
-    /// Without the atlas, and with it (bindings 8 to 16).
-    layouts: [Layouts; 2],
+    /// Without the atlas, and with it (bindings 8 to 16); each without a history and with one (binding 17): indexed
+    /// `atlas + 2 * history`.
+    layouts: [Layouts; 4],
     /// The block sprite arrays and their sampler, for a pass with the atlas (`set_atlas`).
     atlas: Option<([wgpu::TextureView; ATLAS_ARRAYS], wgpu::Sampler)>,
-    /// Whether the pass in `built` was built with the atlas.
+    /// Whether the pass in `built` was built with the atlas, and with a history.
     built_atlas: bool,
+    built_history: bool,
+    /// The previous frame's camera and when the pass last ran (a history's reprojection and validity).
+    previous: Option<([[f32; 4]; 4], [[f32; 4]; 4], [f32; 4], Instant)>,
+    /// Whether the spare picture holds a frame the pass drew.
+    history_drawn: bool,
     linear: wgpu::Sampler,
     nearest: wgpu::Sampler,
     uniform: wgpu::Buffer,
@@ -277,6 +302,14 @@ impl ModPost {
             )])
             .chain(ATLAS_MORE.map(array))
             .collect();
+        let history = fragment(
+            HISTORY_BINDING,
+            wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+        );
         let layouts = |label, entries: &[wgpu::BindGroupLayoutEntry]| {
             let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some(label),
@@ -289,10 +322,14 @@ impl ModPost {
             });
             (layout, pipeline_layout)
         };
-        let both = |with_atlas: bool| {
-            let extra = if with_atlas { &atlas[..] } else { &[] };
-            let whole: Vec<_> = entries[..6].iter().chain(extra).copied().collect();
-            let join: Vec<_> = entries.iter().chain(extra).copied().collect();
+        let both = |with_atlas: bool, with_history: bool| {
+            let extra: Vec<_> = (if with_atlas { &atlas[..] } else { &[] })
+                .iter()
+                .copied()
+                .chain(with_history.then_some(history))
+                .collect();
+            let whole: Vec<_> = entries[..6].iter().chain(&extra).copied().collect();
+            let join: Vec<_> = entries.iter().chain(&extra).copied().collect();
             let (layout, pipeline_layout) = layouts("Horizon mod post", &whole);
             let (join_layout, join_pipeline_layout) = layouts("Horizon mod post join", &join);
             Layouts {
@@ -320,9 +357,12 @@ impl ModPost {
         });
         Self {
             format,
-            layouts: [both(false), both(true)],
+            layouts: [both(false, false), both(true, false), both(false, true), both(true, true)],
             atlas: None,
             built_atlas: false,
+            built_history: false,
+            previous: None,
+            history_drawn: false,
             linear: sampler("Horizon mod post linear", wgpu::FilterMode::Linear),
             nearest: sampler("Horizon mod post nearest", wgpu::FilterMode::Nearest),
             uniform,
@@ -383,8 +423,9 @@ impl ModPost {
         version: u64,
         source: &str,
         atlas: bool,
+        history: bool,
     ) -> bool {
-        self.prepare_at(device, version, source, atlas, Instant::now())
+        self.prepare_at(device, version, source, atlas, history, Instant::now())
     }
 
     fn prepare_at(
@@ -393,22 +434,24 @@ impl ModPost {
         version: u64,
         source: &str,
         atlas: bool,
+        history: bool,
         now: Instant,
     ) -> bool {
         if atlas && self.atlas.is_none() {
             return false;
         }
         // (the same source with the atlas or without is another pass: other layouts)
-        if atlas != self.built_atlas {
+        if atlas != self.built_atlas || history != self.built_history {
             self.built = None;
             self.built_atlas = atlas;
+            self.built_history = history;
         }
         if Built::due(self.built.as_ref(), version, now) {
             let before = Built::failures(self.built.as_ref(), version);
             let full = format!("{PRELUDE}\n{source}");
             let result = validate(&full)
                 .map_err(Failure::Invalid)
-                .and_then(|stages| self.pipelines(device, &full, stages, atlas));
+                .and_then(|stages| self.pipelines(device, &full, stages, atlas, history));
             match &result {
                 Ok(_) if before > 0 => {
                     log::info!("Horizon: a mod's post pass compiled on try {}", before + 1);
@@ -447,8 +490,9 @@ impl ModPost {
         source: &str,
         stages: Stages,
         atlas: bool,
+        history: bool,
     ) -> Result<Pipelines, Failure> {
-        let layouts = &self.layouts[usize::from(atlas)];
+        let layouts = &self.layouts[usize::from(atlas) + 2 * usize::from(history)];
         // popped in the reverse order
         let out_of_memory = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
         let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
@@ -542,9 +586,33 @@ impl ModPost {
             self.output = Some(Output {
                 size,
                 view,
+                spare: None,
                 half: None,
             });
+            self.history_drawn = false;
         }
+        let now = Instant::now();
+        if self.built_history {
+            let output = self.output.as_mut().expect("made above");
+            // (the picture drawn last frame becomes the history, and the other is drawn into)
+            let spare = output
+                .spare
+                .get_or_insert_with(|| picture(device, "Horizon mod post history", size, self.format));
+            std::mem::swap(&mut output.view, spare);
+            let fresh = self
+                .previous
+                .is_some_and(|(.., at)| now.duration_since(at) < HISTORY_MAX_AGE);
+            let valid = self.history_drawn && fresh;
+            let (pv, pp, pc) = match self.previous {
+                Some((v, p, c, _)) => (v, p, c),
+                None => (frame.view, frame.projection, frame.camera_position),
+            };
+            frame.previous_view = pv;
+            frame.previous_projection = pp;
+            frame.previous_camera_position = [pc[0], pc[1], pc[2], if valid { 1.0 } else { 0.0 }];
+            self.history_drawn = true;
+        }
+        self.previous = Some((frame.view, frame.projection, frame.camera_position, now));
         let split = matches!(
             self.built.as_ref().and_then(Built::ready),
             Some(Pipelines::Split { .. })
@@ -591,7 +659,16 @@ impl ModPost {
                 resource: self.data.as_entire_binding(),
             },
         ];
-        let layouts = &self.layouts[usize::from(self.built_atlas)];
+        let layouts =
+            &self.layouts[usize::from(self.built_atlas) + 2 * usize::from(self.built_history)];
+        if self.built_history
+            && let Some(spare) = &output.spare
+        {
+            entries.push(wgpu::BindGroupEntry {
+                binding: HISTORY_BINDING,
+                resource: wgpu::BindingResource::TextureView(spare),
+            });
+        }
         if self.built_atlas
             && let Some((arrays, sampler)) = &self.atlas
         {
@@ -933,36 +1010,37 @@ mod tests {
         post.fail_builds = 0;
         let plain = "@fragment fn fs_main(in: StageIn) -> @location(0) vec4<f32> {\n    \
             return textureSampleLevel(scene_color, linear_sampler, in.uv, 0.0);\n}\n";
-        assert!(post.prepare(&device, 1, plain, false));
+        assert!(post.prepare(&device, 1, plain, false, false));
         // binding 6 is only in the join's layout
         let unbound = SPLIT.replace(
             "return textureSampleLevel(scene_color, linear_sampler, in.uv, 0.0);",
             "return textureLoad(half_picture, vec2<i32>(0), 0);",
         );
         validate(&format!("{PRELUDE}\n{unbound}")).unwrap();
-        assert!(!post.prepare(&device, 2, &unbound, false));
+        assert!(!post.prepare(&device, 2, &unbound, false, false));
         assert!(matches!(post.built.as_ref().unwrap().state, State::Refused));
         assert!(!post.prepare_at(
             &device,
             2,
             &unbound,
             false,
+            false,
             Instant::now() + Duration::from_secs(60)
         ));
         // the driver fails twice, then builds
         post.fail_builds = 2;
         let t0 = Instant::now();
-        assert!(!post.prepare_at(&device, 3, plain, false, t0));
+        assert!(!post.prepare_at(&device, 3, plain, false, false, t0));
         assert_eq!(post.fail_builds, 1);
-        assert!(!post.prepare_at(&device, 3, plain, false, t0 + Duration::from_secs(1)));
+        assert!(!post.prepare_at(&device, 3, plain, false, false, t0 + Duration::from_secs(1)));
         assert_eq!(
             post.fail_builds, 1,
             "not tried again before its retry is due"
         );
         let t1 = t0 + RETRY_AFTER[0];
-        assert!(!post.prepare_at(&device, 3, plain, false, t1));
+        assert!(!post.prepare_at(&device, 3, plain, false, false, t1));
         assert_eq!(post.fail_builds, 0);
-        assert!(post.prepare_at(&device, 3, plain, false, t1 + RETRY_AFTER[1]));
+        assert!(post.prepare_at(&device, 3, plain, false, false, t1 + RETRY_AFTER[1]));
     }
 
     /// A pass with the atlas declares bindings 8 to 16 itself (the prelude only shows them in its comments), so it
@@ -1066,13 +1144,13 @@ mod tests {
         let mut post = ModPost::new(&device, rgba8);
         post.fail_builds = 0;
         // no atlas given yet: a pass with it waits
-        assert!(!post.prepare(&device, 1, ATLAS, true));
+        assert!(!post.prepare(&device, 1, ATLAS, true, false));
         post.set_atlas(&[array(&first), array(&second)], &sampler);
         // without the capability the pass's bindings are not in the layout: refused, logged
-        assert!(!post.prepare(&device, 1, ATLAS, false));
+        assert!(!post.prepare(&device, 1, ATLAS, false, false));
         assert!(matches!(post.built.as_ref().unwrap().state, State::Refused));
         // with it, built (the same version: another layout is another pass)
-        assert!(post.prepare(&device, 1, ATLAS, true));
+        assert!(post.prepare(&device, 1, ATLAS, true, false));
         let size = 4;
         let world = texture(
             "world",
@@ -1164,17 +1242,118 @@ mod tests {
         // a pass that doesn't use the atlas runs with it as without
         let plain = "@fragment fn fs_main(in: StageIn) -> @location(0) vec4<f32> {\n    \
             return textureSampleLevel(scene_color, linear_sampler, in.uv, 0.0);\n}\n";
-        assert!(post.prepare(&device, 2, plain, true));
+        assert!(post.prepare(&device, 2, plain, true, false));
         assert!(
             draw(&mut post, [0.0; 4])
                 .iter()
                 .all(|&p| p == [9, 9, 9, 255])
         );
-        assert!(post.prepare(&device, 2, plain, false));
+        assert!(post.prepare(&device, 2, plain, false, false));
         assert!(
             draw(&mut post, [0.0; 4])
                 .iter()
                 .all(|&p| p == [9, 9, 9, 255])
         );
+    }
+
+    /// With a real device: a pass with a history reads what it returned the frame before (a counter that grows by a
+    /// tenth a frame), the history is invalid on the first frame and after a gap, and a pass that declares the
+    /// history without asking for it is refused.
+    #[test]
+    fn a_pass_with_a_history_reads_its_previous_picture() {
+        let Some((device, queue)) = device_queue() else {
+            eprintln!("no GPU adapter: skipped");
+            return;
+        };
+        let rgba8 = wgpu::TextureFormat::Rgba8Unorm;
+        let size = 4u32;
+        let make = |format, usage| {
+            device
+                .create_texture(&wgpu::TextureDescriptor {
+                    label: None,
+                    size: wgpu::Extent3d {
+                        width: size,
+                        height: size,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format,
+                    usage,
+                    view_formats: &[],
+                })
+                .create_view(&Default::default())
+        };
+        let world = make(rgba8, wgpu::TextureUsages::TEXTURE_BINDING);
+        let depth = make(
+            wgpu::TextureFormat::Depth32Float,
+            wgpu::TextureUsages::TEXTURE_BINDING,
+        );
+        let counter = "@group(0) @binding(17) var history_picture: texture_2d<f32>;\n\
+            @fragment fn fs_main(in: StageIn) -> @location(0) vec4<f32> {\n    \
+            let h = textureSampleLevel(history_picture, nearest_sampler, in.uv, 0.0);\n    \
+            return vec4<f32>(h.r + 0.1, frame.previous_camera_position.w, 0.0, 1.0);\n}\n";
+        let mut post = ModPost::new(&device, rgba8);
+        post.fail_builds = 0;
+        // declared but not asked for: refused
+        assert!(!post.prepare(&device, 1, counter, false, false));
+        assert!(matches!(post.built.as_ref().unwrap().state, State::Refused));
+        assert!(post.prepare(&device, 1, counter, false, true));
+        let run = |post: &mut ModPost| -> [u8; 4] {
+            let mut encoder = device.create_command_encoder(&Default::default());
+            let out = post
+                .run(
+                    &device,
+                    &queue,
+                    &mut encoder,
+                    &world,
+                    &depth,
+                    [size, size],
+                    FrameUniform::default(),
+                )
+                .texture()
+                .clone();
+            let read = device.create_buffer(&wgpu::BufferDescriptor {
+                label: None,
+                size: 256 * u64::from(size),
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            encoder.copy_texture_to_buffer(
+                out.as_image_copy(),
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &read,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(256),
+                        rows_per_image: None,
+                    },
+                },
+                wgpu::Extent3d {
+                    width: size,
+                    height: size,
+                    depth_or_array_layers: 1,
+                },
+            );
+            queue.submit([encoder.finish()]);
+            read.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+            device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            let data = read.slice(..).get_mapped_range().unwrap();
+            [data[0], data[1], data[2], data[3]]
+        };
+        let near = |p: [u8; 4], tenths: u8, valid: u8| {
+            assert!(p[0].abs_diff(tenths * 26) <= 2 * tenths, "{p:?} at {tenths}");
+            assert_eq!(p[1], valid, "{p:?}");
+        };
+        near(run(&mut post), 1, 0);
+        near(run(&mut post), 2, 255);
+        near(run(&mut post), 3, 255);
+        // a gap: the history is not valid, and the pass starts over
+        post.previous = post
+            .previous
+            .map(|(v, p, c, at)| (v, p, c, at - Duration::from_secs(2)));
+        let after = run(&mut post);
+        assert_eq!(after[1], 0, "{after:?}");
     }
 }

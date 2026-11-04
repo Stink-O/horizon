@@ -308,6 +308,12 @@ interface render {
     /// Uploaded to the GPU only when they change. At most 262,144 words
     /// (1 MiB) a call; more are ignored (logged).
     set-data: func(words: list<u32>);
+    /// Asks for the pass's history (default off, off again by `clear-post`): the game keeps what the pass returned the
+    /// frame before and gives it back as `history_picture` (binding 17 of the prelude, which the pass declares itself)
+    /// with the previous frame's camera (`frame.previous_view`, `previous_projection`, `previous_camera_position`),
+    /// for feedback, trails and temporal reprojection (docs/mods.md, "A history"). Costs one more picture of memory
+    /// and a texture read; a pass that declares the binding without asking for it is refused (logged).
+    set-history: func(on: bool);
     /// Shakes the camera: a jolt of `strength` (0 to 1, 1 the hardest) that
     /// fades out over `seconds` (at most 30). Jolts add up. The game turns
     /// the view (not the player) with smooth noise, scaled by the player's

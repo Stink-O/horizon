@@ -197,6 +197,8 @@ pub struct Post {
     pub data: Option<(Arc<[u32]>, u64)>,
     /// The mod has capability `atlas`: the pass is given the block sprite arrays (bindings 8 to 16).
     pub atlas: bool,
+    /// The mod asked for a history (`render.set-history`): the pass is given its previous picture (binding 17).
+    pub history: bool,
 }
 
 /// A mod's text panel, drawn every frame until it changes.
@@ -266,6 +268,7 @@ struct State {
     post_source: Option<(Arc<str>, u64)>,
     post_params: Option<[f32; POST_PARAMS]>,
     post_data: Option<(Arc<[u32]>, u64)>,
+    post_history: bool,
     /// Capability `world`: answers to its `surface-height` queries, for its next `poll-surface-heights`.
     surface: Vec<SurfaceHeights>,
     /// Capability `world`: answers to its `read-columns` queries, for its next `poll-columns`.
@@ -443,6 +446,7 @@ impl Mods {
             post_source: None,
             post_params: None,
             post_data: None,
+            post_history: false,
             surface: Vec::new(),
             columns: Vec::new(),
             flying_speed: None,
@@ -772,6 +776,7 @@ impl Mods {
                     .manifest
                     .as_ref()
                     .is_some_and(|m| m.capabilities.contains(&crate::Capability::Atlas)),
+                history: s.post_history,
             })
         })
     }
@@ -1066,6 +1071,10 @@ impl render::Host for State {
         self.post_source = None;
         self.post_params = None;
         self.post_data = None;
+        self.post_history = false;
+    }
+    fn set_history(&mut self, on: bool) {
+        self.post_history = on;
     }
     fn set_data(&mut self, words: Vec<u32>) {
         if words.len() > POST_DATA_WORDS {

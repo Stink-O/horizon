@@ -1138,6 +1138,7 @@ type ModPostPass = (
     [f32; 16],
     Option<(std::sync::Arc<[u32]>, u64)>,
     bool,
+    bool,
 );
 
 struct Game<'a> {
@@ -10136,13 +10137,14 @@ impl Game<'_> {
         };
         let mod_post = self.mod_post_pass();
         let frame = Frame {
-            mod_post: mod_post.as_ref().map(|(source, version, params, data, atlas)| {
+            mod_post: mod_post.as_ref().map(|(source, version, params, data, atlas, history)| {
                 horizon_client::gfx::ModPost {
                     source,
                     version: *version,
                     params: *params,
                     data: data.as_ref().map(|(d, v)| (&d[..], *v)),
                     atlas: *atlas,
+                    history: *history,
                     day_fraction: (self.world.day_time.rem_euclid(24_000) as f32 + alpha as f32)
                         / 24_000.0,
                     partial_tick: alpha as f32,

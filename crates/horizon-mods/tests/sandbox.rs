@@ -345,6 +345,18 @@ fn post_data_is_kept_versioned_and_capped() {
     assert_eq!(mods.post().unwrap().data.unwrap().0.len(), POST_DATA_WORDS);
 }
 
+#[test]
+fn a_history_is_asked_for_and_ended_with_the_pass() {
+    let mut mods = load("horizon_mods_test_guest.hmod");
+    mods.command("history off");
+    assert!(!mods.post().unwrap().history);
+    mods.command("history on");
+    assert!(mods.post().unwrap().history);
+    mods.command("clear");
+    mods.command("history off");
+    assert!(!mods.post().unwrap().history);
+}
+
 /// The game's stand-in for the atlas: a grass block (its top tinted, its sides overlaid) and nothing else.
 struct GrassOnly(u64);
 impl AtlasLookup for GrassOnly {

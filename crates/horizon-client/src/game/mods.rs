@@ -248,7 +248,7 @@ impl Game<'_> {
         self.mods
             .mods
             .post()
-            .map(|p| (p.source, p.version, p.params, p.data, p.atlas))
+            .map(|p| (p.source, p.version, p.params, p.data, p.atlas, p.history))
     }
     /// Reads `horizon-mods/` and the dev mods, and starts the ones turned on.
     pub(super) fn start_mods(&mut self) {

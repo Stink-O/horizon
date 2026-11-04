@@ -299,6 +299,8 @@ pub struct ModPost<'a> {
     pub data: Option<(&'a [u32], u64)>,
     /// The mod has capability `atlas`: the pass is given the block sprite arrays (gfx/mod_post.rs).
     pub atlas: bool,
+    /// The mod asked for a history (`render.set-history`): the pass is given its previous picture (binding 17).
+    pub history: bool,
     /// The time of day (0 sunrise, 0.25 noon) and the partial tick, for `frame.time`.
     pub day_fraction: f32,
     pub partial_tick: f32,
@@ -3700,7 +3702,7 @@ impl Renderer {
         }
         // A mod's post pass, compiled when its source changes; skipped while it does not compile.
         let mod_post = frame.mod_post.filter(|mp| {
-            !frame.title && self.mod_post.prepare(&self.device, mp.version, mp.source, mp.atlas)
+            !frame.title && self.mod_post.prepare(&self.device, mp.version, mp.source, mp.atlas, mp.history)
         });
         // The world's targets: the screen, or the scaled target of `post`.
         let pack_post = !frame.title && self.pack_post.as_ref().is_some_and(|p| p.1.is_some());

@@ -19,7 +19,7 @@ impl Mod for Guest {
     fn init() -> Result<(Self, Registration), String> {
         let hooks = [
             "spin", "panic", "grow", "hello", "save", "load", "save_key", "fly", "screen", "typed",
-            "surface", "heights", "data", "columns", "blocks", "sprites",
+            "surface", "heights", "data", "history", "clear", "columns", "blocks", "sprites",
         ]
         .into_iter()
         .fold(Registration::new(), Registration::command)
@@ -162,6 +162,16 @@ impl Mod for Guest {
                     })
                     .collect();
                 chat::show(&format!("{} | {}", atlas::resources_version(), answers.join(", ")));
+                Ok(None)
+            }
+            "history" => {
+                render::set_post("@fragment fn fs_main(in: StageIn) -> @location(0) vec4<f32> { return vec4<f32>(1.0); }");
+                render::set_params(&[0.0; 16]);
+                render::set_history(args == "on");
+                Ok(None)
+            }
+            "clear" => {
+                render::clear_post();
                 Ok(None)
             }
             "data" => {
