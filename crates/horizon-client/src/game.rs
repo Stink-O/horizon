@@ -10715,7 +10715,9 @@ impl Game<'_> {
         if let Some(renderer) = self.renderer.as_mut() {
             renderer.hold_world(world_hold);
             let g = &self.settings.horizon;
-            let budgeted = g.chunk_updates > 0 || g.upload_budget_kib > 0;
+            // (a held world's sections can't be seen going in: they take their time, and leave the frames alone)
+            let held = renderer.world_held();
+            let budgeted = g.chunk_updates > 0 || g.upload_budget_kib > 0 || held;
             if !budgeted && self.pending_uploads.is_empty() {
                 horizon_client::spans::time("upload", || {
                     for (key, mesh) in uploads {
@@ -10740,7 +10742,9 @@ impl Game<'_> {
                 let centre = self.streaming.center;
                 let far = |k: &(i32, i32, i32)| (k.0 - centre.0).pow(2) + (k.2 - centre.1).pow(2);
                 pending.sort_unstable_by_key(|(k, _)| std::cmp::Reverse(far(k)));
-                let (limit, budget) = if budgeted {
+                let (limit, budget) = if held {
+                    (0, horizon_client::gfx::HELD_UPLOAD_BYTES)
+                } else if budgeted {
                     (
                         g.chunk_updates as usize,
                         u64::from(g.upload_budget_kib) * 1024,

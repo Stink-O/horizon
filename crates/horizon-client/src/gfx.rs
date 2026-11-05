@@ -302,6 +302,7 @@ pub struct Frame<'a> {
     /// A mod's world warp (capability `render`, gfx/warp.rs).
     pub world_warp: Option<WorldWarp<'a>>,
 }
+pub use hold::HELD_UPLOAD_BYTES;
 pub use warp::WorldWarp;
 /// A mod's post pass this frame: its WGSL (without `mod_post::PRELUDE`), a version that changes with it, and
 /// the parameters it reads as `frame.mod_params`.
@@ -2636,6 +2637,10 @@ impl Renderer {
         if self.hold.ask(on, std::time::Instant::now()) {
             self.swap_held();
         }
+    }
+    /// Whether sections wait behind a mod's hold.
+    pub fn world_held(&self) -> bool {
+        self.hold.held()
     }
     /// Everything waiting behind a hold takes its place, on this frame.
     fn swap_held(&mut self) {

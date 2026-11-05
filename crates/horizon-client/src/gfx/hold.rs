@@ -14,6 +14,9 @@ use std::time::{Duration, Instant};
 
 /// The longest a hold lasts.
 pub(super) const MAX_HOLD: Duration = Duration::from_secs(30);
+/// The new meshes uploaded a frame while held: nothing shows for them, so they spread out over the frames (what is left
+/// when the hold lets go goes up on the next frame).
+pub const HELD_UPLOAD_BYTES: u64 = 2 << 20;
 /// The most bytes of new meshes that wait.
 pub(super) const MAX_BYTES: u64 = 1 << 30;
 

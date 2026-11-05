@@ -624,7 +624,8 @@ with no warp runs none of it, and entities don't go through it (what follows `//
 `render.hold-world(true)` keeps the terrain on screen as it stands while the world changes under it, and
 `render.hold-world(false)` shows every change on one frame. Use it to make a change too big to go in at a stroke (thousands
 of sections) appear at once: the edits go in over seconds at whatever pace suits them, the game lights, meshes and uploads
-their sections as ever, and letting go only swaps which sections are drawn, with nothing left to upload.
+their sections as ever (uploads are spread over the frames while held), and letting go only swaps which sections are drawn, with
+nothing left to upload. Give the game a second or so between the last edit and letting go: a section not ready by then shows late.
 
 The world is not held, only its picture: blocks, collisions, block entities and light change at once, so the land a
 player sees may not be the land they stand on. Edits that land under a player are theirs to answer for. Entities are drawn
