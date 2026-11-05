@@ -618,3 +618,20 @@ fn world_fragment(f: Fragment) -> Painted {
 So a warp can cut, paint or retexture the land by where it really is, to the pixel, however far it has been moved. With a
 `world_fragment` the warp decides for itself which faces to leave out. It is only in the terrain's warp pipelines: a frame
 with no warp runs none of it, and entities don't go through it (what follows `// [fragments]` stays out of their shader).
+
+## Holding the world
+
+`render.hold-world(true)` keeps the terrain on screen as it stands while the world changes under it, and
+`render.hold-world(false)` shows every change on one frame. Use it to make a change too big to go in at a stroke (thousands
+of sections) appear at once: the edits go in over seconds at whatever pace suits them, the game lights, meshes and uploads
+their sections as ever, and letting go only swaps which sections are drawn, with nothing left to upload.
+
+The world is not held, only its picture: blocks, collisions, block entities and light change at once, so the land a
+player sees may not be the land they stand on. Edits that land under a player are theirs to answer for. Entities are drawn
+as they are. Only sections are held; far terrain's tiles are not.
+
+While held, both the old and the new mesh of each changed section are in video memory. A hold is meant for seconds and
+is bounded: it lets go by itself after 30 seconds, past 1 GiB of waiting meshes and when video memory runs out, showing what
+waited early rather than losing it. It ends with no swap when the sections go (another world or dimension: what waited goes
+with them), and ends when the mod calls `clear-post` or stops, so it can't outlive the mod. Ended any of these ways, it stays
+off until the mod has turned it off and on again.

@@ -292,6 +292,8 @@ struct State {
     warp_source: Option<(Arc<str>, u64)>,
     /// `render.warp-on`: the anchor, the copies, their radius.
     warp_on: Option<([f64; 3], u32, f32)>,
+    /// `render.hold-world`.
+    world_hold: bool,
     /// Capability `world`: answers to its `surface-height` queries, for its next `poll-surface-heights`.
     surface: Vec<SurfaceHeights>,
     /// Capability `world`: answers to its `read-columns` queries, for its next `poll-columns`.
@@ -474,6 +476,7 @@ impl Mods {
             post_history: false,
             warp_source: None,
             warp_on: None,
+            world_hold: false,
             surface: Vec::new(),
             columns: Vec::new(),
             flying_speed: None,
@@ -780,6 +783,10 @@ impl Mods {
             let (anchor, copies, radius) = s.warp_on?;
             Some(Warp { source, version, params: s.post_params?, anchor, copies, radius })
         })
+    }
+    /// Whether a running mod holds the world as it is drawn (`render.hold-world`). A mod that stopped holds nothing.
+    pub fn world_hold(&self) -> bool {
+        self.entries.iter().any(|e| e.run.as_ref().is_some_and(|r| r.store.data().world_hold))
     }
     /// What mod `id`'s screen draws, while it is open.
     pub fn screen(&self, id: &str) -> Option<&[Draw]> {
@@ -1140,6 +1147,7 @@ impl render::Host for State {
         self.post_params = None;
         self.post_data = None;
         self.post_history = false;
+        self.world_hold = false;
     }
     fn set_history(&mut self, on: bool) {
         self.post_history = on;
@@ -1160,6 +1168,9 @@ impl render::Host for State {
     }
     fn warp_on(&mut self, on: bool, x: f64, y: f64, z: f64, copies: u32, radius: f32) {
         self.warp_on = on.then_some(([x, y, z], copies.min(MAX_WARP_COPIES), radius.clamp(0.0, 1024.0)));
+    }
+    fn hold_world(&mut self, on: bool) {
+        self.world_hold = on;
     }
     fn set_data(&mut self, words: Vec<u32>) {
         if words.len() > POST_DATA_WORDS {

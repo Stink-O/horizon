@@ -326,6 +326,13 @@ interface render {
     /// frame by where it was: more is drawn. `copies` (at most 8) draws the solid sections within `radius` blocks of
     /// (x, y, z) that many times more, each with its number (1 up) as the warp's `copy`.
     warp-on: func(on: bool, x: f64, y: f64, z: f64, copies: u32, radius: f32);
+    /// Holds the terrain as it is drawn (off by default): sections that change are worked out and uploaded behind the
+    /// ones on screen, and all take their place on the one frame this is turned off, so a mod can change a great deal of
+    /// land and show it at a stroke, with no pop-in and no hitch. The world itself changes at once, collisions included.
+    /// Ends by itself after 30 s, past 1 GiB of new meshes, when video memory runs out, when the sections go (another
+    /// world or dimension), when the mod clears its pass and when it stops; once ended that way, it stays off until the
+    /// mod has turned it off and on again (docs/mods.md, "Holding the world").
+    hold-world: func(on: bool);
     /// Shakes the camera: a jolt of `strength` (0 to 1, 1 the hardest) that
     /// fades out over `seconds` (at most 30). Jolts add up. The game turns
     /// the view (not the player) with smooth noise, scaled by the player's

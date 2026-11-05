@@ -68,6 +68,7 @@ mod flat;
 pub mod lightning;
 mod lod;
 mod mod_post;
+mod hold;
 mod warp;
 mod occlusion;
 mod pack_atlas;
@@ -177,6 +178,13 @@ struct SectionGpu {
     sorted_indices: Option<(u32, u64)>,
     /// Its id for flat draws (`flat::Flat::add`), when they are on.
     flat_id: Option<u32>,
+}
+/// A section's new mesh behind a hold (gfx/hold.rs): uploaded, and what else takes its place with it.
+struct HeldSection {
+    gpu: Option<SectionGpu>,
+    meshed: bool,
+    visibility: u64,
+    block_entities: Vec<([i32; 3], u32)>,
 }
 /// Line segments the hit outline can hold.
 const MAX_OUTLINE_EDGES: u64 = 256;
@@ -504,6 +512,9 @@ pub struct Renderer {
     pack_atlas: Option<pack_atlas::PackAtlas>,
     /// A mod's post pass (capability `render`).
     mod_post: mod_post::ModPost,
+    /// A mod's hold on the world (`hold_world`, gfx/hold.rs), and the new sections waiting behind it.
+    hold: hold::Gate,
+    held: crate::fast_hash::FxHashMap<SectionKey, HeldSection>,
     warp_kit: warp::Kit,
     warp: Option<warp::Pipelines>,
     warp_refused: Option<u64>,
@@ -2363,6 +2374,8 @@ impl Renderer {
             pack_post: None,
             pack_atlas: None,
             mod_post,
+            hold: Default::default(),
+            held: Default::default(),
             warp_kit: warp::Kit {
                 layout: layout.clone(),
                 entity_layout: entity_layout.clone(),
@@ -2567,12 +2580,38 @@ impl Renderer {
         self.occlusion.update(camera, (distance / 16.0) as i32 + 2);
     }
     pub fn upload(&mut self, key: SectionKey, mesh: &SectionMesh) {
-        self.occlusion.set(key, mesh.visibility);
-        let changed = if mesh.block_entities.is_empty() {
+        let meshed = mesh.solid.is_empty() && mesh.translucent.is_empty();
+        if self.hold.held() {
+            self.drop_held(key);
+            let gpu = self.upload_mesh(mesh);
+            if gpu.is_some() || meshed {
+                let over = self.hold.add(Self::section_bytes(gpu.as_ref()));
+                let (visibility, block_entities) = (mesh.visibility, mesh.block_entities.clone());
+                self.held.insert(key, HeldSection { gpu, meshed, visibility, block_entities });
+                if over {
+                    log::warn!("Horizon: a held world's new sections came to {} MiB: let go", self.hold.bytes() >> 20);
+                    self.hold.spend();
+                    self.swap_held();
+                }
+                return;
+            }
+            // (the arena is full: the old meshes given back, and this one uploaded as ever)
+            self.hold.spend();
+            self.swap_held();
+        }
+        self.section_facts(key, mesh.visibility, &mesh.block_entities);
+        self.release_section(key);
+        let section = self.upload_mesh(mesh);
+        self.section_placed(key, section, meshed);
+    }
+    /// What goes with a section's mesh, the mesh apart.
+    fn section_facts(&mut self, key: SectionKey, visibility: u64, block_entities: &[([i32; 3], u32)]) {
+        self.occlusion.set(key, visibility);
+        let changed = if block_entities.is_empty() {
             self.block_entities.remove(&key).is_some()
         } else {
-            let old = self.block_entities.insert(key, mesh.block_entities.clone());
-            old.as_deref() != Some(&mesh.block_entities[..])
+            let old = self.block_entities.insert(key, block_entities.to_vec());
+            old.as_deref() != Some(block_entities)
         };
         if changed {
             self.block_entity_revision = next_block_entity_revision();
@@ -2580,14 +2619,42 @@ impl Renderer {
         if !self.lod_retiring.is_empty() {
             self.lod_retiring.remove(&key);
         }
-        self.release_section(key);
-        let section = self.upload_mesh(mesh);
-        self.set_detail(
-            key,
-            section.is_some() || (mesh.solid.is_empty() && mesh.translucent.is_empty()),
-        );
+    }
+    /// `section` drawn from now on (`empty`: there is nothing to draw, and that is its mesh).
+    fn section_placed(&mut self, key: SectionKey, section: Option<SectionGpu>, empty: bool) {
+        self.set_detail(key, section.is_some() || empty);
         if let Some(section) = section {
             self.sections.insert(key, section);
+        }
+    }
+    /// The bytes a section's mesh takes in the arena.
+    fn section_bytes(gpu: Option<&SectionGpu>) -> u64 {
+        gpu.map_or(0, |s| u64::from(s.solid + s.translucent) * 4 * std::mem::size_of::<TerrainVertex>() as u64)
+    }
+    /// A mod's hold on the world (gfx/hold.rs), asked each frame: while on, sections that change wait behind the ones drawn.
+    pub fn hold_world(&mut self, on: bool) {
+        if self.hold.ask(on, std::time::Instant::now()) {
+            self.swap_held();
+        }
+    }
+    /// Everything waiting behind a hold takes its place, on this frame.
+    fn swap_held(&mut self) {
+        let waiting = std::mem::take(&mut self.held);
+        let (count, started) = (waiting.len(), std::time::Instant::now());
+        let bytes: u64 = waiting.values().map(|w| Self::section_bytes(w.gpu.as_ref())).sum();
+        for (key, w) in waiting {
+            self.section_facts(key, w.visibility, &w.block_entities);
+            self.release_section(key);
+            self.section_placed(key, w.gpu, w.meshed);
+        }
+        self.hold.take(u64::MAX);
+        log::info!("Horizon: a held world's {count} new sections ({} MiB) swapped in, in {:.1} ms", bytes >> 20, started.elapsed().as_secs_f64() * 1e3);
+    }
+    /// A section's mesh waiting behind a hold given up.
+    fn drop_held(&mut self, key: SectionKey) {
+        if let Some(gpu) = self.held.remove(&key).and_then(|w| w.gpu) {
+            self.hold.take(Self::section_bytes(Some(&gpu)));
+            self.release_mesh(gpu);
         }
     }
     fn upload_mesh(&mut self, mesh: &SectionMesh) -> Option<SectionGpu> {
@@ -2743,6 +2810,9 @@ impl Renderer {
         self.block_entities.clear();
         self.block_entity_revision = next_block_entity_revision();
         self.sections.clear();
+        // (a hold is on land that is gone; the arena's clearing below takes what waited)
+        self.held.clear();
+        self.hold.spend();
         self.lods.clear();
         self.lod_cutout.clear();
         self.lod_retiring.clear();
@@ -2785,6 +2855,7 @@ impl Renderer {
         }
     }
     pub fn remove(&mut self, key: SectionKey) {
+        self.drop_held(key);
         self.set_detail(key, false);
         if self.block_entities.remove(&key).is_some() {
             self.block_entity_revision = next_block_entity_revision();

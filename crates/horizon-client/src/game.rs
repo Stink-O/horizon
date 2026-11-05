@@ -10711,7 +10711,9 @@ impl Game<'_> {
         {
             log::warn!("Horizon: failed to save unloaded chunks: {e}");
         }
+        let world_hold = self.mod_world_hold();
         if let Some(renderer) = self.renderer.as_mut() {
+            renderer.hold_world(world_hold);
             let g = &self.settings.horizon;
             let budgeted = g.chunk_updates > 0 || g.upload_budget_kib > 0;
             if !budgeted && self.pending_uploads.is_empty() {

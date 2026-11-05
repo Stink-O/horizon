@@ -357,6 +357,23 @@ fn a_world_warp_is_held_while_on_with_its_copies_capped() {
 }
 
 #[test]
+fn a_hold_on_the_world_ends_with_the_mod_and_its_pass() {
+    let mut mods = load("horizon_mods_test_guest.hmod");
+    assert!(!mods.world_hold());
+    mods.command("hold on");
+    assert!(mods.world_hold());
+    mods.command("hold off");
+    assert!(!mods.world_hold());
+    mods.command("hold on");
+    mods.command("clear");
+    assert!(!mods.world_hold(), "clear-post ends it");
+    mods.command("hold on");
+    assert!(mods.world_hold());
+    mods.command("panic");
+    assert!(!mods.world_hold(), "a mod that stopped holds nothing");
+}
+
+#[test]
 fn a_history_is_asked_for_and_ended_with_the_pass() {
     let mut mods = load("horizon_mods_test_guest.hmod");
     mods.command("history off");
