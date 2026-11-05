@@ -319,7 +319,8 @@ interface render {
     /// `pos` is the vertex from the camera; `Warped` is `{ pos: vec3<f32>, tint: vec3<f32> }`, where to draw it from the
     /// camera and what to multiply its colour by. It reads `globals.warp` (docs/mods.md, "A world warp"). It may be
     /// any function of the position, so the mod can bend the real world, and is built when first turned on. It runs only
-    /// while `warp-on` holds it on.
+    /// while `warp-on` holds it on. After a line `// [fragments]` the source may go on with `world_fragment`, every pixel
+    /// of the terrain with where it really is, where it is drawn, its texture and its light (docs/mods.md).
     set-warp: func(wgsl: string);
     /// Turns the world warp on or off (off by default, and when the mod stops). While on, nothing is left out of a
     /// frame by where it was: more is drawn. `copies` (at most 8) draws the solid sections within `radius` blocks of

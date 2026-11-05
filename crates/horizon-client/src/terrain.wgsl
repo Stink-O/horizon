@@ -81,6 +81,8 @@ struct TerrainOut {
     @location(2) color: vec4<f32>,
     @location(3) spherical: f32,
     @location(4) cylindrical: f32,
+    // [warp varyings]
+    // [end warp varyings]
 }
 // Horizon Extras' dynamic lights (dynamic_light.rs): the block light, in the vertex's units
 // (16 per level), a vertex at camera-relative `pos` gets from the frame's light sources, one
@@ -138,13 +140,10 @@ fn terrain_vertex(position: vec3<f32>, uv: vec2<f32>, layer: u32, color: vec4<f3
     out.layer = layer;
     let block = max(f32(light.y), dynamic_block_light(pos));
     out.color = color * sample_lightmap(f32(light.x) / 16.0, block / 16.0) * vec4(warped.tint, 1.0);
-    // While a world warp is on the land is seen from any side: faces no light reaches (the rock's caves, sealed rooms) are
-    // left out, or from under it they would be all that shows. fs_solid drops a pixel by its alpha.
-    if globals.warp[5].w > 0.0 && light.x < 8u && light.y < 8u { out.color.a = 0.0; }
-    // (a tint under 0 leaves the vertex's faces out: a warp's way of cutting the land)
-    if warped.tint.r < 0.0 { out.color.a = 0.0; }
     out.spherical = length(pos);
     out.cylindrical = max(length(pos.xz), abs(pos.y));
+    // [warp vertex]
+    // [end warp vertex]
     return out;
 }
 fn linear_fog(d: f32, start: f32, end: f32) -> f32 {

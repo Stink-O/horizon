@@ -597,6 +597,24 @@ entities' shaders: name what else you declare so it can't clash (a prefix). `ren
 are built the first time (without back-face culling), and while it is on no section, tile or face is left out by the
 frustum, the cave culling or occlusion, because the warp may bring it into view, so the frame costs more. `copies` draws
 the solid sections near a point again with `copy` 1 up, so the mod can multiply a piece of the land. A tint with red
-under 0 leaves a vertex's faces out (cut at the pixel), and faces no light reaches (caves, the rock's insides) are left
-out while the warp is on. A warp that doesn't
-compile is logged ("a mod's world warp did not compile") and skipped.
+under 0 leaves a vertex's faces out, and faces no light reaches (caves, the rock's insides) are left out while the warp
+is on, unless the warp has its own fragments. A warp that doesn't compile is logged ("a mod's world warp did not
+compile") and skipped.
+
+The same source may go on, after a line `// [fragments]`, with a function every pixel of the terrain goes through:
+
+```wgsl
+// [fragments]
+fn world_fragment(f: Fragment) -> Painted {
+    // Fragment: home (where the point really is, from the camera: world_warp's pos), at (where it is drawn, from the
+    // camera), uv, layer (sprite(uv, layer) is the block's texture, and it repeats), color (biome tint, light, the warp's
+    // tint), light (sky and block light, 0 to 15), cut (over 0 where a tint had red under 0), copy, front (false on a
+    // face's back: nothing is culled).
+    if f.light.x < 8.0 { return Painted(vec4<f32>(0.0, 0.0, 0.0, -1.0), 1.0); }  // alpha under 0: left out
+    return Painted(sprite(f.uv * 2.0, f.layer) * f.color, 1.0);  // Painted: { color, fog (how much of the fog it takes) }
+}
+```
+
+So a warp can cut, paint or retexture the land by where it really is, to the pixel, however far it has been moved. With a
+`world_fragment` the warp decides for itself which faces to leave out. It is only in the terrain's warp pipelines: a frame
+with no warp runs none of it, and entities don't go through it (what follows `// [fragments]` stays out of their shader).
