@@ -2676,7 +2676,7 @@ impl Renderer {
             self.section_placed(key, w.gpu, w.meshed);
             count += 1;
         }
-        log::info!("Horizon: {count} of a held world's new sections let go early, in {:.1} ms", started.elapsed().as_secs_f64() * 1e3);
+        log::debug!("Horizon: {count} of a held world's new sections let go early, in {:.1} ms", started.elapsed().as_secs_f64() * 1e3);
     }
     /// A section's mesh waiting behind a hold given up.
     fn drop_held(&mut self, key: SectionKey) {
