@@ -619,6 +619,9 @@ So a warp can cut, paint or retexture the land by where it really is, to the pix
 `world_fragment` the warp decides for itself which faces to leave out. It is only in the terrain's warp pipelines: a frame
 with no warp runs none of it, and entities don't go through it (what follows `// [fragments]` stays out of their shader).
 
+In `world_warp`, `warp_section` is the corner of the section or far tile the vertex belongs to, from the camera (for an
+entity, its own position). A vertex on the edge between two sections lies on both by position alone; this says which.
+
 ## Holding the world
 
 `render.hold-world(true)` keeps the terrain on screen as it stands while the world changes under it, and

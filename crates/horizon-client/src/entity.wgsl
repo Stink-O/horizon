@@ -75,6 +75,8 @@ fn dynamic_block_light(pos: vec3<f32>) -> f32 {
     }
     return level * 16.0;
 }
+// (an entity has no section: the terrain's, for a warp that reads it)
+var<private> warp_section: vec3<f32>;
 // [world warp]
 // (as in terrain.wgsl)
 struct Warped {
@@ -89,6 +91,7 @@ fn entity_vertex(at: vec3<f32>, uv: vec2<f32>,
     // (the sky's things stay where they are)
     var position = at;
     if overlay < 2u || overlay > 4u {
+        warp_section = at;
         position = world_warp(at, 0u).pos;
     }
     out.clip = globals.view_proj * vec4(position, 1.0);

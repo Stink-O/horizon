@@ -65,6 +65,9 @@ fn sprite(uv: vec2<f32>, layer: u32) -> vec4<f32> {
     }
 }
 
+// The corner of the section or far tile this vertex belongs to, from the camera (a world warp's to read: a vertex on the edge
+// between two sections says by itself which it lies on no better than its position does).
+var<private> warp_section: vec3<f32>;
 // [world warp]
 // What a mod's world warp gives a vertex: where to draw it (camera-relative) and what to multiply its colour by
 // (red under 0: leave these faces out, to the pixel, as far as an edge of the face goes).
@@ -132,6 +135,7 @@ fn terrain_uv(packed: vec2<u32>, step: f32) -> vec2<f32> {
 }
 fn terrain_vertex(position: vec3<f32>, uv: vec2<f32>, layer: u32, color: vec4<f32>,
     light: vec2<u32>, origin: vec3<f32>, copy: u32) -> TerrainOut {
+    warp_section = origin;
     let warped = world_warp(position + origin, copy);
     let pos = warped.pos;
     var out: TerrainOut;
