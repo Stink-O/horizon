@@ -10712,8 +10712,9 @@ impl Game<'_> {
             log::warn!("Horizon: failed to save unloaded chunks: {e}");
         }
         let world_hold = self.mod_world_hold();
+        let world_hold_within = self.mod_world_hold_within().to_vec();
         if let Some(renderer) = self.renderer.as_mut() {
-            renderer.hold_world(world_hold);
+            renderer.hold_world(world_hold, world_hold_within);
             let g = &self.settings.horizon;
             // (a held world's sections can't be seen going in: they take their time, and leave the frames alone)
             let held = renderer.world_held();

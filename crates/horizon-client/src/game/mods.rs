@@ -235,6 +235,9 @@ impl Game<'_> {
     pub(super) fn mod_world_hold(&self) -> bool {
         false
     }
+    pub(super) fn mod_world_hold_within(&self) -> &[(f64, f64, f64)] {
+        &[]
+    }
     pub(super) fn mod_use_start(&mut self) -> bool {
         false
     }
@@ -266,6 +269,10 @@ impl Game<'_> {
     /// Whether a running mod holds the world as it is drawn.
     pub(super) fn mod_world_hold(&self) -> bool {
         self.mods.mods.world_hold()
+    }
+    /// The circles it keeps that hold to: none, all of the world.
+    pub(super) fn mod_world_hold_within(&self) -> &[(f64, f64, f64)] {
+        self.mods.mods.world_hold_within()
     }
     /// Reads `horizon-mods/` and the dev mods, and starts the ones turned on.
     pub(super) fn start_mods(&mut self) {

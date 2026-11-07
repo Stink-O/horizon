@@ -20,6 +20,12 @@ pub const HELD_UPLOAD_BYTES: u64 = 2 << 20;
 /// The most bytes of new meshes that wait.
 pub(super) const MAX_BYTES: u64 = 1 << 30;
 
+/// Whether section `key`'s middle lies in one of these circles (x, z, radius; none: all of the world is held).
+pub(super) fn covers(within: &[(f64, f64, f64)], key: super::SectionKey) -> bool {
+    let (x, z) = (f64::from(key.0) * 16.0 + 8.0, f64::from(key.2) * 16.0 + 8.0);
+    within.is_empty() || within.iter().any(|&(cx, cz, r)| (x - cx).hypot(z - cz) <= r)
+}
+
 /// Whether the world is held, and what is waiting.
 #[derive(Default)]
 pub(super) struct Gate {
@@ -73,6 +79,15 @@ impl Gate {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_hold_is_kept_to_its_circles() {
+        assert!(covers(&[], (900, 0, 900)));
+        // (a section's middle, not its corner)
+        assert!(covers(&[(8.0, 8.0, 1.0)], (0, 3, 0)));
+        assert!(!covers(&[(0.0, 0.0, 11.0)], (0, 3, 0)));
+        assert!(covers(&[(0.0, 0.0, 12.0)], (0, 3, 0)));
+        assert!(covers(&[(1000.0, 0.0, 1.0), (24.0, 8.0, 0.5)], (1, 0, 0)));
+    }
     #[test]
     fn a_hold_starts_and_lets_go_when_asked() {
         let (mut g, t) = (Gate::default(), Instant::now());

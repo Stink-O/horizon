@@ -333,6 +333,11 @@ interface render {
     /// world or dimension), when the mod clears its pass and when it stops; once ended that way, it stays off until the
     /// mod has turned it off and on again (docs/mods.md, "Holding the world").
     hold-world: func(on: bool);
+    /// While `hold-world` is on, holds only the sections whose middles lie in these circles (x, z, radius, in blocks):
+    /// the ones outside take their place on this frame, and what changes out there from now on shows as ever. So a mod
+    /// can let a held change go a piece at a time. It stays until it is called again or the hold ends; an empty list
+    /// holds everything again.
+    hold-world-within: func(areas: list<tuple<f64, f64, f64>>);
     /// Shakes the camera: a jolt of `strength` (0 to 1, 1 the hardest) that
     /// fades out over `seconds` (at most 30). Jolts add up. The game turns
     /// the view (not the player) with smooth noise, scaled by the player's

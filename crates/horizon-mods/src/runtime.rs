@@ -294,6 +294,8 @@ struct State {
     warp_on: Option<([f64; 3], u32, f32)>,
     /// `render.hold-world`.
     world_hold: bool,
+    /// `render.hold-world-within`.
+    world_hold_within: Vec<(f64, f64, f64)>,
     /// Capability `world`: answers to its `surface-height` queries, for its next `poll-surface-heights`.
     surface: Vec<SurfaceHeights>,
     /// Capability `world`: answers to its `read-columns` queries, for its next `poll-columns`.
@@ -477,6 +479,7 @@ impl Mods {
             warp_source: None,
             warp_on: None,
             world_hold: false,
+            world_hold_within: Vec::new(),
             surface: Vec::new(),
             columns: Vec::new(),
             flying_speed: None,
@@ -787,6 +790,10 @@ impl Mods {
     /// Whether a running mod holds the world as it is drawn (`render.hold-world`). A mod that stopped holds nothing.
     pub fn world_hold(&self) -> bool {
         self.entries.iter().any(|e| e.run.as_ref().is_some_and(|r| r.store.data().world_hold))
+    }
+    /// The circles a running mod's hold is kept to (`render.hold-world-within`): empty, all of the world.
+    pub fn world_hold_within(&self) -> &[(f64, f64, f64)] {
+        self.entries.iter().find_map(|e| e.run.as_ref().map(|r| r.store.data()).filter(|d| d.world_hold)).map_or(&[], |d| &d.world_hold_within)
     }
     /// What mod `id`'s screen draws, while it is open.
     pub fn screen(&self, id: &str) -> Option<&[Draw]> {
@@ -1148,6 +1155,7 @@ impl render::Host for State {
         self.post_data = None;
         self.post_history = false;
         self.world_hold = false;
+        self.world_hold_within.clear();
     }
     fn set_history(&mut self, on: bool) {
         self.post_history = on;
@@ -1171,6 +1179,12 @@ impl render::Host for State {
     }
     fn hold_world(&mut self, on: bool) {
         self.world_hold = on;
+        if !on {
+            self.world_hold_within.clear();
+        }
+    }
+    fn hold_world_within(&mut self, areas: Vec<(f64, f64, f64)>) {
+        self.world_hold_within = areas;
     }
     fn set_data(&mut self, words: Vec<u32>) {
         if words.len() > POST_DATA_WORDS {

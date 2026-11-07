@@ -631,6 +631,10 @@ The world is not held, only its picture: blocks, collisions, block entities and 
 player sees may not be the land they stand on. Edits that land under a player are theirs to answer for. Entities are drawn
 as they are. Only sections are held; far terrain's tiles are not.
 
+`render.hold-world-within(areas)` lets a held change go a piece at a time: only the sections whose middles lie in the circles
+given (x, z, radius) go on waiting, the rest take their place on that frame, and what changes out there from then on shows as
+ever. Shrink the circles over a few calls to let a change spread across the land. An empty list holds everything again.
+
 While held, both the old and the new mesh of each changed section are in video memory. A hold is meant for seconds and
 is bounded: it lets go by itself after 30 seconds, past 1 GiB of waiting meshes and when video memory runs out, showing what
 waited early rather than losing it. It ends with no swap when the sections go (another world or dimension: what waited goes

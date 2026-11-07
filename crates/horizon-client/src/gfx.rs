@@ -516,6 +516,8 @@ pub struct Renderer {
     /// A mod's hold on the world (`hold_world`, gfx/hold.rs), and the new sections waiting behind it.
     hold: hold::Gate,
     held: crate::fast_hash::FxHashMap<SectionKey, HeldSection>,
+    /// The circles the hold is kept to (x, z, radius): empty, all of the world.
+    hold_within: Vec<(f64, f64, f64)>,
     warp_kit: warp::Kit,
     warp: Option<warp::Pipelines>,
     warp_refused: Option<u64>,
@@ -2377,6 +2379,7 @@ impl Renderer {
             mod_post,
             hold: Default::default(),
             held: Default::default(),
+            hold_within: Vec::new(),
             warp_kit: warp::Kit {
                 layout: layout.clone(),
                 entity_layout: entity_layout.clone(),
@@ -2582,7 +2585,7 @@ impl Renderer {
     }
     pub fn upload(&mut self, key: SectionKey, mesh: &SectionMesh) {
         let meshed = mesh.solid.is_empty() && mesh.translucent.is_empty();
-        if self.hold.held() {
+        if self.hold.held() && hold::covers(&self.hold_within, key) {
             self.drop_held(key);
             let gpu = self.upload_mesh(mesh);
             if gpu.is_some() || meshed {
@@ -2633,9 +2636,15 @@ impl Renderer {
         gpu.map_or(0, |s| u64::from(s.solid + s.translucent) * 4 * std::mem::size_of::<TerrainVertex>() as u64)
     }
     /// A mod's hold on the world (gfx/hold.rs), asked each frame: while on, sections that change wait behind the ones drawn.
-    pub fn hold_world(&mut self, on: bool) {
+    pub fn hold_world(&mut self, on: bool, within: Vec<(f64, f64, f64)>) {
         if self.hold.ask(on, std::time::Instant::now()) {
             self.swap_held();
+        }
+        if !self.hold.held() {
+            self.hold_within.clear();
+        } else if within != self.hold_within {
+            self.hold_within = within;
+            self.swap_held_outside();
         }
     }
     /// Whether sections wait behind a mod's hold.
@@ -2654,6 +2663,20 @@ impl Renderer {
         }
         self.hold.take(u64::MAX);
         log::info!("Horizon: a held world's {count} new sections ({} MiB) swapped in, in {:.1} ms", bytes >> 20, started.elapsed().as_secs_f64() * 1e3);
+    }
+    /// What waits outside the circles the hold is kept to takes its place, on this frame.
+    fn swap_held_outside(&mut self) {
+        let keys: Vec<SectionKey> = self.held.keys().copied().filter(|&k| !hold::covers(&self.hold_within, k)).collect();
+        let (mut count, started) = (0, std::time::Instant::now());
+        for key in keys {
+            let Some(w) = self.held.remove(&key) else { continue };
+            self.hold.take(Self::section_bytes(w.gpu.as_ref()));
+            self.section_facts(key, w.visibility, &w.block_entities);
+            self.release_section(key);
+            self.section_placed(key, w.gpu, w.meshed);
+            count += 1;
+        }
+        log::info!("Horizon: {count} of a held world's new sections let go early, in {:.1} ms", started.elapsed().as_secs_f64() * 1e3);
     }
     /// A section's mesh waiting behind a hold given up.
     fn drop_held(&mut self, key: SectionKey) {
