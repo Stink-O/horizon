@@ -43,7 +43,7 @@ pub use crate::game::{
 pub use crate::gamerules::Value as GameRuleValue;
 pub use crate::gfx::native_render::{
     BlockSpriteArrays, RenderHooks, RenderNeeds, RenderNeedsEvent, WorldDrawn, WorldDrawnEvent,
-    wgpu,
+    WorldWarp, WorldWarpEvent, wgpu,
 };
 pub use crate::hud::HudBatch;
 pub use crate::hud_layout::{GuiDraw, HealthHud, HealthInputs};

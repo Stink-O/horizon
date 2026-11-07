@@ -219,6 +219,9 @@ struct TerrainOut {
     // The camera-relative height, for the water mirror's cut at the plane.
     @location(9) height: f32,
     @location(10) @interpolate(flat) emissive_layer: u32,
+    // [world warp varyings]
+    // (a native mod's world warp adds its own here: gfx/world_warp.rs)
+    // [end world warp varyings]
 }
 // Whether a fading tile or section leaves this pixel out (gfx/lod.rs's
 // `fade_code`, `fade_out_code`). It fades in, or out, chunk by chunk: each
@@ -561,7 +564,10 @@ fn hdr_facing() -> f32 {
 }
 fn terrain_vertex(position: vec3<f32>, uv: vec2<f32>, layer: u32, color: vec4<f32>,
     light: vec2<u32>, origin: vec3<f32>, w: f32) -> TerrainOut {
+    // [world warp vertex]
+    // (a world warp's pipelines put the point through the mod's `world_warp`: gfx/world_warp.rs)
     let pos = position + origin;
+    // [end world warp vertex]
     var out: TerrainOut;
     out.clip = fade_depth(globals.view_proj * vec4(pos, 1.0), w);
     out.local = position;
@@ -594,6 +600,8 @@ fn terrain_vertex(position: vec3<f32>, uv: vec2<f32>, layer: u32, color: vec4<f3
     const CHUNK_FULLY_VISIBLE_RANGE: f32 = 16.0;
     out.visibility = mix(1.0, instance_visibility(w),
         clamp((length(pos) - CHUNK_FULLY_VISIBLE_RANGE) / CHUNK_FULLY_VISIBLE_RANGE, 0.0, 1.0));
+    // [world warp out]
+    // [end world warp out]
     return out;
 }
 fn linear_fog(d: f32, start: f32, end: f32) -> f32 {
