@@ -48,6 +48,10 @@ pub(super) struct ModsState {
     /// The chat's command tree while a running mod owns commands.
     #[cfg(feature = "mods")]
     tree: Option<Dispatcher>,
+    /// The server's tree (single player's own included) plus the running mods' commands, while a mod owns any: the
+    /// chat parses and completes with the server's tree once it has one, so the mods' commands go into it too.
+    #[cfg(feature = "mods")]
+    served: Option<Dispatcher>,
     /// The mod whose screen is open (`Screen::Mod`).
     #[cfg(feature = "mods")]
     pub(super) screen: Option<String>,
@@ -99,6 +103,14 @@ impl ModsState {
             motion.controlled_simulation_tick(keys)?;
         }
         Ok(())
+    }
+    /// The chat's tree on a server: `server`'s, plus the running mods' commands when a mod owns any.
+    pub(super) fn over_server<'a>(&'a self, server: &'a Dispatcher) -> &'a Dispatcher {
+        #[cfg(feature = "mods")]
+        if let Some(tree) = &self.served {
+            return tree;
+        }
+        server
     }
     /// The chat's command tree: vanilla's, plus the running mods' commands.
     pub(super) fn dispatcher(&self) -> &Dispatcher {
@@ -356,6 +368,16 @@ impl Game<'_> {
             .peek()
             .is_some()
             .then(|| vanilla::game_dispatcher().with_mod_commands(names));
+        self.sync_served_commands();
+    }
+    /// The server's tree with the running mods' commands added, after either changed.
+    pub(super) fn sync_served_commands(&mut self) {
+        let server = self.remote.as_ref().and_then(|r| r.commands.as_ref());
+        let mut names = self.mods.mods.commands().peekable();
+        self.mods.served = match server {
+            Some(tree) if names.peek().is_some() => Some(tree.with_mod_commands(names)),
+            _ => None,
+        };
     }
     /// After the options changed: restart the mods if the list of the ones
     /// turned on did.

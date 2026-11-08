@@ -2522,6 +2522,8 @@ impl Game<'_> {
                 if let Some(r) = self.remote.as_mut() {
                     r.commands = Some(tree);
                 }
+                #[cfg(feature = "mods")]
+                self.sync_served_commands();
             }
             C::SystemChat(p) => {
                 // The component as sent, translated in the client's own
