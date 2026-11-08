@@ -261,7 +261,10 @@ impl Surface for NativeSurface {
         // avoid bad frame pacing when the Vulkan driver is using a DXGI swapchain. See
         // https://github.com/gfx-rs/wgpu/issues/8310 and
         // https://github.com/gfx-rs/wgpu/issues/8354 for more details.
-        let fence = if cfg!(target_os = "windows") {
+        //
+        // Horizon: NVIDIA's driver elsewhere (Linux, Wayland) gets it too, so the CPU waits until the presentation
+        // engine has given an image back, and no submission waits for that on the GPU (`acquire_on_cpu`).
+        let fence = if cfg!(target_os = "windows") || acquire_on_cpu(device.shared.vendor_id) {
             let raw = unsafe {
                 device
                     .shared
@@ -501,10 +504,24 @@ impl Swapchain for NativeSwapchain {
         if let Some(fence) = self.fence {
             unsafe {
                 // The `wait_all` argument must be `true` to avoid crash on some Android devices. See https://github.com/gfx-rs/wgpu/pull/8769
-                self.device
-                    .raw
-                    .wait_for_fences(&[fence], true, timeout_ns)
-                    .map_err(map_host_device_oom_and_lost_err)?;
+                // Horizon: the image is ours from here, so a wait that times out goes on (a compositor slow to give
+                // the image back stalls this thread, never the GPU), up to five seconds; then the swapchain is given
+                // up as lost, and the caller makes a new one.
+                let step = timeout_ns.clamp(1, 1_000_000_000);
+                let started = std::time::Instant::now();
+                loop {
+                    match self.device.raw.wait_for_fences(&[fence], true, step) {
+                        Ok(()) => break,
+                        Err(vk::Result::TIMEOUT) if started.elapsed() < core::time::Duration::from_secs(5) => {
+                            log::warn!(
+                                "the presentation engine has held a swapchain image for {:.1} s",
+                                started.elapsed().as_secs_f32()
+                            );
+                        }
+                        Err(vk::Result::TIMEOUT) => return Err(crate::SurfaceError::Lost),
+                        Err(other) => return Err(map_host_device_oom_and_lost_err(other).into()),
+                    }
+                }
 
                 self.device
                     .raw
@@ -933,5 +950,17 @@ impl<'a> SwapchainSubmissionSemaphoreGuard for NativeSwapchainSubmissionSemaphor
         self.present_semaphores_guard
             .get_submit_signal_semaphore(device)
             .map(SemaphoreType::Binary)
+    }
+}
+
+/// Whether this device's acquires are waited for on the CPU (an acquire fence) rather than only on the GPU (the acquire
+/// semaphore). On NVIDIA's driver under Wayland a submission that waits on the GPU for an image the compositor still
+/// holds (it holds them longer while the screen is being captured) could keep the GPU on that context until the
+/// kernel's context switch timeout (Xid 109) lost the device. `HORIZON_ACQUIRE_FENCE=0` or `=1` overrides it.
+fn acquire_on_cpu(vendor_id: u32) -> bool {
+    match std::env::var("HORIZON_ACQUIRE_FENCE").as_deref() {
+        Ok("0") => false,
+        Ok("1") => true,
+        _ => vendor_id == crate::auxil::db::nvidia::VENDOR,
     }
 }

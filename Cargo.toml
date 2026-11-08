@@ -21,6 +21,9 @@ large_enum_variant = "allow"
 # since 1.3.215, and Intel's Windows driver for 6th-10th gen iGPUs (HD 520/530,
 # UHD 620/630) crashes on it with an access violation (#746). Drop this and the
 # folder once a wgpu release has the fix.
+# It also waits for swapchain images on the CPU on NVIDIA (swapchain/native.rs,
+# `acquire_on_cpu`): a frame that waited for one on the GPU while the compositor
+# held it (screen capture running) hung the GPU until Xid 109 lost the device.
 [patch.crates-io]
 wgpu-hal = { path = "third_party/wgpu-hal" }
 
