@@ -592,3 +592,22 @@ fn mod_commands_join_the_tree_for_every_player() {
     // The game's own tree is left as it was.
     assert!(vanilla::game_dispatcher().find("where").is_none());
 }
+#[test]
+fn a_mod_command_path_offers_its_words() {
+    let reg = Registries {
+        permission: 0,
+        ..reg()
+    };
+    let d = vanilla::game_dispatcher().with_mod_commands(["orbital", "orbital give", "orbital terrain on", "orbital terrain off"]);
+    for line in ["orbital", "orbital give", "orbital terrain on", "orbital anything at all", "orbital give extra"] {
+        let parse = d.parse(line, &reg);
+        assert_eq!(parse.executable().unwrap().1, MOD_COMMAND, "{line}");
+    }
+    let words = |line: &str| -> Vec<String> {
+        let parse = d.parse(line, &reg);
+        d.client_suggestions(&parse, line.len(), &reg).1.into_iter().map(|s| s.text).collect()
+    };
+    assert!(words("orbital g").contains(&"give".to_owned()), "{:?}", words("orbital g"));
+    let on = words("orbital terrain o");
+    assert!(on.contains(&"on".to_owned()) && on.contains(&"off".to_owned()), "{on:?}");
+}

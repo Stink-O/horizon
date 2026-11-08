@@ -750,13 +750,31 @@ impl Dispatcher {
     /// This tree plus the commands mods own (`docs/mods.md`), so the chat
     /// colours and completes them like the others. Every player may use one,
     /// and the text after its name goes to the mod as it was typed.
+    ///
+    /// A name with spaces in it is a path of words under its first, which
+    /// the chat then offers as it fills in (`orbital give`): each word runs
+    /// the mod's command too, with whatever follows it.
     pub fn with_mod_commands<'a>(&self, names: impl IntoIterator<Item = &'a str>) -> Dispatcher {
         let mut d = self.clone();
         for name in names {
-            let command = d.literal(0, name);
-            d.executes(command, MOD_COMMAND);
-            let args = d.argument(command, "args", ArgType::Greedy);
-            d.executes(args, MOD_COMMAND);
+            let mut node = 0;
+            for word in name.split_whitespace() {
+                let found = d.nodes[node]
+                    .children
+                    .iter()
+                    .copied()
+                    .find(|&c| matches!(&d.nodes[c].kind, NodeKind::Literal(w) if w == word));
+                node = match found {
+                    Some(c) => c,
+                    None => {
+                        let c = d.literal(node, word);
+                        d.executes(c, MOD_COMMAND);
+                        let args = d.argument(c, "args", ArgType::Greedy);
+                        d.executes(args, MOD_COMMAND);
+                        c
+                    }
+                };
+            }
         }
         d
     }
