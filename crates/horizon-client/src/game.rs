@@ -8018,6 +8018,7 @@ impl Game<'_> {
         self.begin_closing_save(false)
     }
     fn finish_close_world(&mut self) -> Result<()> {
+        self.mods_left_world();
         self.ambience.clear(&mut self.audio);
         // updateLevelInEngines(null): every sound stops; the music manager
         // lets go of its track.
@@ -10140,7 +10141,9 @@ impl Game<'_> {
         };
         let mod_post = self.mod_post_pass();
         let world_warp = self.mod_world_warp();
+        let hand_tint = self.mod_hand_tint();
         let frame = Frame {
+            hand_tint,
             world_warp: world_warp.as_ref().map(|w| horizon_client::gfx::WorldWarp {
                 source: &w.0,
                 version: w.1,
@@ -12824,6 +12827,7 @@ fn loading_frame(hud: &HudBatch) -> Frame<'_> {
         menu_blur: None,
         mod_post: None,
         world_warp: None,
+        hand_tint: None,
     }
 }
 

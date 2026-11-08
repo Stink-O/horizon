@@ -461,6 +461,7 @@ impl Game<'_> {
             return self.begin_closing_save(false);
         }
         self.finish_perf();
+        self.mods_left_world();
         if reason.is_none() {
             // Leaving on purpose: nothing for auto-reconnect to retry.
             self.extras_left();

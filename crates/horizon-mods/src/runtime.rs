@@ -203,6 +203,9 @@ pub struct Post {
     pub history: bool,
 }
 
+/// The most `render.set-hand-tint` multiplies the hand's colour by.
+pub const MAX_HAND_TINT: f32 = 8.0;
+
 /// The most times `render.warp-on` draws the land near its anchor again.
 pub const MAX_WARP_COPIES: u32 = 8;
 
@@ -296,6 +299,8 @@ struct State {
     world_hold: bool,
     /// `render.hold-world-within`.
     world_hold_within: Vec<(f64, f64, f64)>,
+    /// `render.set-hand-tint` (1, 1, 1: none).
+    hand_tint: [f32; 3],
     /// Capability `world`: answers to its `surface-height` queries, for its next `poll-surface-heights`.
     surface: Vec<SurfaceHeights>,
     /// Capability `world`: answers to its `read-columns` queries, for its next `poll-columns`.
@@ -480,6 +485,7 @@ impl Mods {
             warp_on: None,
             world_hold: false,
             world_hold_within: Vec::new(),
+            hand_tint: [1.0; 3],
             surface: Vec::new(),
             columns: Vec::new(),
             flying_speed: None,
@@ -794,6 +800,18 @@ impl Mods {
     /// The circles a running mod's hold is kept to (`render.hold-world-within`): empty, all of the world.
     pub fn world_hold_within(&self) -> &[(f64, f64, f64)] {
         self.entries.iter().find_map(|e| e.run.as_ref().map(|r| r.store.data()).filter(|d| d.world_hold)).map_or(&[], |d| &d.world_hold_within)
+    }
+    /// The first running mod's hand tint (`render.set-hand-tint`), when it has one other than 1, 1, 1.
+    pub fn hand_tint(&self) -> Option<[f32; 3]> {
+        self.entries.iter().find_map(|e| Some(e.run.as_ref()?.store.data().hand_tint).filter(|t| *t != [1.0; 3]))
+    }
+    /// Puts every mod's hand tint back to 1, 1, 1 (the player left the world).
+    pub fn clear_hand_tints(&mut self) {
+        for e in &mut self.entries {
+            if let Some(r) = e.run.as_mut() {
+                r.store.data_mut().hand_tint = [1.0; 3];
+            }
+        }
     }
     /// What mod `id`'s screen draws, while it is open.
     pub fn screen(&self, id: &str) -> Option<&[Draw]> {
@@ -1185,6 +1203,9 @@ impl render::Host for State {
     }
     fn hold_world_within(&mut self, areas: Vec<(f64, f64, f64)>) {
         self.world_hold_within = areas;
+    }
+    fn set_hand_tint(&mut self, r: f32, g: f32, b: f32) {
+        self.hand_tint = [r, g, b].map(|c| if c.is_finite() { c.clamp(0.0, MAX_HAND_TINT) } else { 1.0 });
     }
     fn set_data(&mut self, words: Vec<u32>) {
         if words.len() > POST_DATA_WORDS {

@@ -23,6 +23,8 @@ struct Globals {
     dynamic_lights: array<vec4<f32>, 16>,
     // A mod's world warp (terrain.wgsl)
     warp: array<vec4<f32>, 6>,
+    // A mod's tint of the hand and held item (render.set-hand-tint), w 1 while on: the hand's globals only.
+    hand_tint: vec4<f32>,
 }
 @group(0) @binding(0) var<uniform> globals: Globals;
 @group(0) @binding(1) var atlas: texture_2d<f32>;
@@ -223,7 +225,9 @@ fn linear_fog(d: f32, start: f32, end: f32) -> f32 {
     }
     let f = max(linear_fog(in.spherical, globals.fog.x, globals.fog.y),
                 linear_fog(in.cylindrical, globals.fog.z, globals.fog.w));
-    return vec4(mix(color.rgb, globals.fog_color.rgb, f * globals.fog_color.a), color.a);
+    // render.set-hand-tint: the hand's globals only (w 0 elsewhere: no change).
+    let tint = mix(vec3(1.0), globals.hand_tint.rgb, globals.hand_tint.w);
+    return vec4(mix(color.rgb, globals.fog_color.rgb, f * globals.fog_color.a) * tint, color.a);
 }
 
 @fragment fn fs_celestial(in: Out) -> @location(0) vec4<f32> {

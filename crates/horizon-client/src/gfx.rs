@@ -164,6 +164,9 @@ struct Globals {
     /// A mod's world warp (gfx/warp.rs): its sixteen floats; the camera (f32) and the partial tick; what the f32 left
     /// out and 1 while on.
     warp: [[f32; 4]; 6],
+    /// A mod's tint of the hand and held item (`render.set-hand-tint`), in the hand's globals only: what entity.wgsl
+    /// multiplies their colour by, w 1 while on (zeroed, as elsewhere: nothing changes).
+    hand_tint: [f32; 4],
 }
 pub type SectionKey = (i32, i32, i32);
 struct SectionGpu {
@@ -269,6 +272,8 @@ pub struct Frame<'a> {
     /// `CameraRenderState.hudFov`: the hand's own field of view
     /// (`GameRenderer.render3dHud`).
     pub hand_fov_degrees: f32,
+    /// A mod's tint of the hand and held item (`render.set-hand-tint`): what their colour is multiplied by.
+    pub hand_tint: Option<[f32; 3]>,
     /// Full-screen camera effects drawn over the world and hand, under the HUD.
     pub screen: &'a [crate::screen_effects::ScreenQuad],
     /// What a shader pack's uniforms need from the game.
@@ -3250,6 +3255,7 @@ impl Renderer {
                 lights
             },
             warp: warp_uniform.unwrap_or_default(),
+            hand_tint: [0.0; 4],
         };
         self.uploads
             .buffer(&mut encoder, &self.globals, 0, bytemuck::bytes_of(&globals));
@@ -3263,6 +3269,7 @@ impl Renderer {
         ));
         let hand_globals = Globals {
             view_proj: (hand_projection * frame.bob * view).to_cols_array_2d(),
+            hand_tint: frame.hand_tint.map_or([0.0; 4], |[r, g, b]| [r, g, b, 1.0]),
             ..globals
         };
         self.uploads.buffer(

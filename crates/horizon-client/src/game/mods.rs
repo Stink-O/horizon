@@ -238,6 +238,10 @@ impl Game<'_> {
     pub(super) fn mod_world_hold_within(&self) -> &[(f64, f64, f64)] {
         &[]
     }
+    pub(super) fn mod_hand_tint(&self) -> Option<[f32; 3]> {
+        None
+    }
+    pub(super) fn mods_left_world(&mut self) {}
     pub(super) fn mod_use_start(&mut self) -> bool {
         false
     }
@@ -273,6 +277,15 @@ impl Game<'_> {
     /// The circles it keeps that hold to: none, all of the world.
     pub(super) fn mod_world_hold_within(&self) -> &[(f64, f64, f64)] {
         self.mods.mods.world_hold_within()
+    }
+    /// A running mod's tint of the first-person hand and held item (`render.set-hand-tint`), while in a world.
+    pub(super) fn mod_hand_tint(&self) -> Option<[f32; 3]> {
+        self.player.as_ref()?;
+        self.mods.mods.hand_tint()
+    }
+    /// The player left the world: what the mods set for it that would outlast it goes.
+    pub(super) fn mods_left_world(&mut self) {
+        self.mods.mods.clear_hand_tints();
     }
     /// Reads `horizon-mods/` and the dev mods, and starts the ones turned on.
     pub(super) fn start_mods(&mut self) {

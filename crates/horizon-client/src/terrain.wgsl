@@ -27,6 +27,8 @@ struct Globals {
     // A mod's world warp (render.set-warp, gfx/warp.rs): the sixteen floats of render.set-params, then xyz the camera
     // in the world (f32) and w the partial tick, then xyz what the f32 leaves out of it and w 1 while it is on.
     warp: array<vec4<f32>, 6>,
+    // A mod's tint of the hand and held item (render.set-hand-tint), w 1 while on: the hand's globals only.
+    hand_tint: vec4<f32>,
 }
 @group(0) @binding(0) var<uniform> globals: Globals;
 @group(0) @binding(1) var sprites: texture_2d_array<f32>;

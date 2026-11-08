@@ -374,6 +374,24 @@ fn a_hold_on_the_world_ends_with_the_mod_and_its_pass() {
 }
 
 #[test]
+fn a_hand_tint_is_kept_clamped_and_gone_with_the_mod() {
+    let mut mods = load("horizon_mods_test_guest.hmod");
+    assert_eq!(mods.hand_tint(), None);
+    mods.command("tint 0.2 0.15 0.1");
+    assert_eq!(mods.hand_tint(), Some([0.2, 0.15, 0.1]));
+    mods.command("tint -1 99 x");
+    assert_eq!(mods.hand_tint(), Some([0.0, horizon_mods::MAX_HAND_TINT, 1.0]));
+    mods.command("tint 1 1 1");
+    assert_eq!(mods.hand_tint(), None, "1, 1, 1 is none");
+    mods.command("tint 0.5 0.5 0.5");
+    mods.clear_hand_tints();
+    assert_eq!(mods.hand_tint(), None, "leaving the world clears it");
+    mods.command("tint 0.5 0.5 0.5");
+    mods.command("panic");
+    assert_eq!(mods.hand_tint(), None, "a mod that stopped tints nothing");
+}
+
+#[test]
 fn a_history_is_asked_for_and_ended_with_the_pass() {
     let mut mods = load("horizon_mods_test_guest.hmod");
     mods.command("history off");
