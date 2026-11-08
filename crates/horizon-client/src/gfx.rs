@@ -1073,6 +1073,11 @@ impl Renderer {
             startup_step(format_args!("creating the pipelines"));
         }
         let gpu_timer = timing::GpuTimer::new(&device, &queue);
+        // (said plainly in the log: what fails after it, a staging belt's buffer or a poll, names the loss only as a
+        // validation error)
+        device.set_device_lost_callback(|reason, message| {
+            log::error!("Horizon renderer: the GPU device was lost ({reason:?}): {message}");
+        });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Horizon terrain"),
             source: wgpu::ShaderSource::Wgsl(include_str!("terrain.wgsl").into()),
