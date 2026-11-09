@@ -262,11 +262,17 @@ impl Surface for NativeSurface {
         // https://github.com/gfx-rs/wgpu/issues/8310 and
         // https://github.com/gfx-rs/wgpu/issues/8354 for more details. In other present modes it
         // only adds acquire latency, see https://github.com/gfx-rs/wgpu/issues/9559.
-        let fence = if cfg!(target_os = "windows")
+        //
+        // Horizon: NVIDIA's driver outside Windows gets it in every present mode, so the CPU waits
+        // until the presentation engine has given the image back and no submission waits for that
+        // on the GPU (`acquire_on_cpu`).
+        let fence = if (cfg!(target_os = "windows")
             && matches!(
                 config.present_mode,
                 wgt::PresentMode::Fifo | wgt::PresentMode::FifoRelaxed
-            ) {
+            ))
+            || acquire_on_cpu(device.shared.vendor_id)
+        {
             let raw = unsafe {
                 device
                     .shared
@@ -506,10 +512,33 @@ impl Swapchain for NativeSwapchain {
         if let Some(fence) = self.fence {
             unsafe {
                 // The `wait_all` argument must be `true` to avoid crash on some Android devices. See https://github.com/gfx-rs/wgpu/pull/8769
-                self.device
-                    .raw
-                    .wait_for_fences(&[fence], true, timeout_ns)
-                    .map_err(map_host_device_oom_and_lost_err)?;
+                //
+                // Horizon: the image is ours from here, so a wait that times out goes on (a
+                // compositor slow to give the image back stalls this thread, never the GPU), with a
+                // warning a second, for up to five seconds; then the swapchain is given up as lost
+                // and the caller makes a new one.
+                let step = timeout_ns.clamp(1_000_000, 1_000_000_000);
+                let started = std::time::Instant::now();
+                let mut warned = 0;
+                loop {
+                    match self.device.raw.wait_for_fences(&[fence], true, step) {
+                        Ok(()) => break,
+                        Err(vk::Result::TIMEOUT) => {
+                            let waited = started.elapsed();
+                            if waited >= core::time::Duration::from_secs(5) {
+                                return Err(crate::SurfaceError::Lost);
+                            }
+                            if waited.as_secs() > warned {
+                                warned = waited.as_secs();
+                                log::warn!(
+                                    "the presentation engine has held a swapchain image for {:.1} s",
+                                    waited.as_secs_f32()
+                                );
+                            }
+                        }
+                        Err(other) => return Err(map_host_device_oom_and_lost_err(other).into()),
+                    }
+                }
 
                 self.device
                     .raw
@@ -938,5 +967,19 @@ impl<'a> SwapchainSubmissionSemaphoreGuard for NativeSwapchainSubmissionSemaphor
         self.present_semaphores_guard
             .get_submit_signal_semaphore(device)
             .map(SemaphoreType::Binary)
+    }
+}
+
+/// Whether this device's acquires are also waited for on the CPU (an acquire fence), not only on
+/// the GPU (the acquire semaphore). On NVIDIA's Linux driver under KDE Wayland, with the screen
+/// being captured, a submission that waited on the GPU for an image the compositor still held kept
+/// the GPU on that context until the kernel's context switch timeout (Xid 109) lost the device.
+/// Windows keeps wgpu's own rule (a fence in FIFO only). `HORIZON_ACQUIRE_FENCE=0` or `=1`
+/// overrides the choice.
+fn acquire_on_cpu(vendor_id: u32) -> bool {
+    match std::env::var("HORIZON_ACQUIRE_FENCE").as_deref() {
+        Ok("0") => false,
+        Ok("1") => true,
+        _ => !cfg!(target_os = "windows") && vendor_id == crate::auxil::db::nvidia::VENDOR,
     }
 }
