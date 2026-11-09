@@ -23,6 +23,8 @@ pub(crate) struct NativeSurface {
     /// query; `None` for non-Win32 surfaces.
     #[cfg(windows)]
     hdr_source: Option<crate::auxil::dxgi::hdr::DxgiHdrSource>,
+    /// Horizon: made from a Wayland surface (`acquire_on_cpu`).
+    wayland: bool,
 }
 
 impl NativeSurface {
@@ -40,7 +42,14 @@ impl NativeSurface {
             instance: Arc::clone(&instance.shared),
             #[cfg(windows)]
             hdr_source: hwnd.map(|wh| crate::auxil::dxgi::hdr::DxgiHdrSource::new(wh.0)),
+            wayland: false,
         }
+    }
+
+    /// Horizon: marks a surface made from a Wayland `wl_surface`.
+    pub fn on_wayland(mut self) -> Self {
+        self.wayland = true;
+        self
     }
 
     pub fn as_raw(&self) -> vk::SurfaceKHR {
@@ -263,15 +272,15 @@ impl Surface for NativeSurface {
         // https://github.com/gfx-rs/wgpu/issues/8354 for more details. In other present modes it
         // only adds acquire latency, see https://github.com/gfx-rs/wgpu/issues/9559.
         //
-        // Horizon: NVIDIA's driver outside Windows gets it in every present mode, so the CPU waits
-        // until the presentation engine has given the image back and no submission waits for that
-        // on the GPU (`acquire_on_cpu`).
+        // Horizon: NVIDIA's driver on a Wayland surface gets it in every present mode, so the CPU
+        // waits until the compositor has given the image back and no submission waits for that on
+        // the GPU (`acquire_on_cpu`).
         let fence = if (cfg!(target_os = "windows")
             && matches!(
                 config.present_mode,
                 wgt::PresentMode::Fifo | wgt::PresentMode::FifoRelaxed
             ))
-            || acquire_on_cpu(device.shared.vendor_id)
+            || acquire_on_cpu(device.shared.vendor_id, self.wayland)
         {
             let raw = unsafe {
                 device
@@ -970,16 +979,17 @@ impl<'a> SwapchainSubmissionSemaphoreGuard for NativeSwapchainSubmissionSemaphor
     }
 }
 
-/// Whether this device's acquires are also waited for on the CPU (an acquire fence), not only on
-/// the GPU (the acquire semaphore). On NVIDIA's Linux driver under KDE Wayland, with the screen
+/// Whether this swapchain's acquires are also waited for on the CPU (an acquire fence), not only
+/// on the GPU (the acquire semaphore). On NVIDIA's Linux driver under KDE Wayland, with the screen
 /// being captured, a submission that waited on the GPU for an image the compositor still held kept
 /// the GPU on that context until the kernel's context switch timeout (Xid 109) lost the device.
-/// Windows keeps wgpu's own rule (a fence in FIFO only). `HORIZON_ACQUIRE_FENCE=0` or `=1`
-/// overrides the choice.
-fn acquire_on_cpu(vendor_id: u32) -> bool {
+/// Only NVIDIA on a Wayland surface by default: elsewhere the fence costs frames with VSync off
+/// (#4604) for nothing. Windows keeps wgpu's own rule (a fence in FIFO only).
+/// `HORIZON_ACQUIRE_FENCE=0` or `=1` overrides the choice on any surface.
+fn acquire_on_cpu(vendor_id: u32, wayland: bool) -> bool {
     match std::env::var("HORIZON_ACQUIRE_FENCE").as_deref() {
         Ok("0") => false,
         Ok("1") => true,
-        _ => !cfg!(target_os = "windows") && vendor_id == crate::auxil::db::nvidia::VENDOR,
+        _ => wayland && vendor_id == crate::auxil::db::nvidia::VENDOR,
     }
 }
