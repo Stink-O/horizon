@@ -343,6 +343,18 @@ interface render {
     /// number: 1). So a pass that darkens or lights the world can take the hand with it. Kept until changed, and back to
     /// 1, 1, 1 when the mod stops and when the player leaves the world.
     set-hand-tint: func(r: f32, g: f32, b: f32);
+    /// Draws the world from `x`, `y`, `z` blocks away from the local
+    /// player's eye, from this frame on (the camera, in first and third
+    /// person; the first-person hand goes with it): for a player standing on
+    /// land a world warp draws moved, so they see it from where it is drawn
+    /// while they walk and collide where it really is. Only the picture
+    /// moves: what the game decides by where the eye is (the block or fluid
+    /// the head is in and its overlay and fog, what the crosshair is on,
+    /// what is heard, the chunks loaded and drawn) still goes by the real
+    /// eye. (0, 0, 0) puts it back; so do `clear-post`, another dimension
+    /// and leaving the world. A value that is not a number is left out;
+    /// each component is clamped to -512..512.
+    set-view-offset: func(x: f64, y: f64, z: f64);
     /// Shakes the camera: a jolt of `strength` (0 to 1, 1 the hardest) that
     /// fades out over `seconds` (at most 30). Jolts add up. The game turns
     /// the view (not the player) with smooth noise, scaled by the player's
@@ -409,6 +421,15 @@ interface %world {
     /// carries hold (and on the first call); a spectator, someone riding,
     /// or a value that is not a number is left alone and answers false.
     carry-player: func(x: f32, y: f32, z: f32, turn: f32) -> bool;
+    /// Moves the local player by `x`, `y`, `z` blocks at once: nothing on
+    /// the way stops them, their velocity, fall distance and flight are
+    /// kept, and they are not drawn sliding there (the next frame shows
+    /// them there, their last position moved with them). Made in the same
+    /// call into the mod as a `render.set-view-offset`, the picture does not
+    /// jump: a player seen from an offset is put where they were seen from.
+    /// Each component is clamped to -512..512; a spectator, someone riding,
+    /// or a value that is not a number is left alone and answers false.
+    shift-player: func(x: f64, y: f64, z: f64) -> bool;
     /// Which of a column's heights a run's `y` counts from (vanilla's
     /// heightmaps): one above the highest block that is not air, that blocks
     /// motion or holds a fluid, that does so and is not leaves, or that is
