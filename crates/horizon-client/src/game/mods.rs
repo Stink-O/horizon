@@ -286,7 +286,7 @@ impl Game<'_> {
     }
     /// A running mod's world warp, while it has it on.
     pub(super) fn mod_world_warp(&self) -> Option<super::ModWorldWarp> {
-        self.mods.mods.warp().map(|w| (w.source, w.version, w.params, w.anchor, w.copies, w.radius))
+        self.mods.mods.warp().map(|w| (w.source, w.version, w.params, w.anchor, w.copies, w.radius, w.data))
     }
     /// Whether a running mod holds the world as it is drawn.
     pub(super) fn mod_world_hold(&self) -> bool {
@@ -310,6 +310,7 @@ impl Game<'_> {
     /// The player left the world: what the mods set for it that would outlast it goes.
     pub(super) fn mods_left_world(&mut self) {
         self.mods.mods.clear_hand_tints();
+        self.mods.mods.clear_warp_data();
         self.mods.mods.clear_view_offsets();
         self.mods.dimension = None;
     }

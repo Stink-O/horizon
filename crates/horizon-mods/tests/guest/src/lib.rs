@@ -19,7 +19,7 @@ impl Mod for Guest {
     fn init() -> Result<(Self, Registration), String> {
         let hooks = [
             "spin", "panic", "grow", "hello", "save", "load", "save_key", "fly", "screen", "typed",
-            "surface", "heights", "data", "history", "warp", "hold", "tint", "offset", "shift", "clear", "columns", "blocks",
+            "surface", "heights", "data", "history", "warp", "warpdata", "hold", "tint", "offset", "shift", "clear", "columns", "blocks",
             "sprites",
         ]
         .into_iter()
@@ -169,6 +169,15 @@ impl Mod for Guest {
                 render::set_params(&[0.0; 16]);
                 render::set_warp(args);
                 render::warp_on(!args.is_empty(), 1.0, 2.0, 3.0, 99, 50.0);
+                Ok(None)
+            }
+            "warpdata" => {
+                let d: Vec<f32> = if args == "many" {
+                    (0..300).map(|i| i as f32).collect()
+                } else {
+                    args.split_whitespace().map(|w| w.parse().unwrap_or(f32::NAN)).collect()
+                };
+                render::set_warp_data(&d);
                 Ok(None)
             }
             "tint" => {

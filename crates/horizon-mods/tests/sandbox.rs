@@ -374,6 +374,25 @@ fn a_hold_on_the_world_ends_with_the_mod_and_its_pass() {
 }
 
 #[test]
+fn warp_data_is_kept_capped_and_gone_with_the_mod() {
+    let mut mods = load("horizon_mods_test_guest.hmod");
+    assert_eq!(mods.warp_data().as_deref(), Some(&[][..]), "zeros until set");
+    mods.command("warpdata 1 2.5 x");
+    assert_eq!(mods.warp_data().as_deref(), Some(&[1.0, 2.5, 0.0][..]), "not a number: 0");
+    mods.command("warp fn world_warp(pos: vec3<f32>, copy: u32) -> Warped { return Warped(pos, vec3<f32>(1.0)); }");
+    assert_eq!(&*mods.warp().expect("the warp").data, &[1.0, 2.5, 0.0], "the warp carries it");
+    mods.command("warpdata many");
+    let d = mods.warp_data().expect("the data");
+    assert_eq!(d.len(), horizon_mods::WARP_DATA, "the rest left out");
+    assert_eq!(d[255], 255.0);
+    mods.clear_warp_data();
+    assert_eq!(mods.warp_data().as_deref(), Some(&[][..]), "leaving the world clears it");
+    mods.command("warpdata 3");
+    mods.command("panic");
+    assert!(mods.warp_data().is_none(), "a mod that stopped has none");
+}
+
+#[test]
 fn a_hand_tint_is_kept_clamped_and_gone_with_the_mod() {
     let mut mods = load("horizon_mods_test_guest.hmod");
     assert_eq!(mods.hand_tint(), None);

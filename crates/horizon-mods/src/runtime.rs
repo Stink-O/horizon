@@ -216,6 +216,9 @@ pub const MAX_VIEW_OFFSET: f64 = 512.0;
 /// The most times `render.warp-on` draws the land near its anchor again.
 pub const MAX_WARP_COPIES: u32 = 8;
 
+/// The most floats `render.set-warp-data` gives the warp (`globals.warp_data`, 64 vec4).
+pub const WARP_DATA: usize = 256;
+
 /// A mod's world warp, while it has it on (`render.set-warp`, `render.warp-on`).
 #[derive(Clone)]
 pub struct Warp {
@@ -225,6 +228,8 @@ pub struct Warp {
     pub anchor: [f64; 3],
     pub copies: u32,
     pub radius: f32,
+    /// `render.set-warp-data`: at most `WARP_DATA` floats (the rest of `globals.warp_data` zeros).
+    pub data: Arc<[f32]>,
 }
 
 /// A mod's text panel, drawn every frame until it changes.
@@ -302,6 +307,8 @@ struct State {
     warp_source: Option<(Arc<str>, u64)>,
     /// `render.warp-on`: the anchor, the copies, their radius.
     warp_on: Option<([f64; 3], u32, f32)>,
+    /// `render.set-warp-data` (empty: zeros).
+    warp_data: Arc<[f32]>,
     /// `render.hold-world`.
     world_hold: bool,
     /// `render.hold-world-within`.
@@ -492,6 +499,7 @@ impl Mods {
             post_history: false,
             warp_source: None,
             warp_on: None,
+            warp_data: Arc::from(Vec::new()),
             world_hold: false,
             world_hold_within: Vec::new(),
             hand_tint: [1.0; 3],
@@ -800,7 +808,7 @@ impl Mods {
             let s = e.run.as_ref()?.store.data();
             let (source, version) = s.warp_source.clone()?;
             let (anchor, copies, radius) = s.warp_on?;
-            Some(Warp { source, version, params: s.post_params?, anchor, copies, radius })
+            Some(Warp { source, version, params: s.post_params?, anchor, copies, radius, data: s.warp_data.clone() })
         })
     }
     /// Whether a running mod holds the world as it is drawn (`render.hold-world`). A mod that stopped holds nothing.
@@ -814,6 +822,18 @@ impl Mods {
     /// The first running mod's hand tint (`render.set-hand-tint`), when it has one other than 1, 1, 1.
     pub fn hand_tint(&self) -> Option<[f32; 3]> {
         self.entries.iter().find_map(|e| Some(e.run.as_ref()?.store.data().hand_tint).filter(|t| *t != [1.0; 3]))
+    }
+    /// The first running mod's warp data (`render.set-warp-data`), whether or not its warp is on.
+    pub fn warp_data(&self) -> Option<Arc<[f32]>> {
+        self.entries.iter().find_map(|e| e.run.as_ref().map(|r| r.store.data().warp_data.clone()))
+    }
+    /// Puts every mod's warp data back to zeros (the player left the world).
+    pub fn clear_warp_data(&mut self) {
+        for e in &mut self.entries {
+            if let Some(r) = e.run.as_mut() {
+                r.store.data_mut().warp_data = Arc::from(Vec::new());
+            }
+        }
     }
     /// Puts every mod's hand tint back to 1, 1, 1 (the player left the world).
     pub fn clear_hand_tints(&mut self) {
@@ -1217,6 +1237,15 @@ impl render::Host for State {
     }
     fn warp_on(&mut self, on: bool, x: f64, y: f64, z: f64, copies: u32, radius: f32) {
         self.warp_on = on.then_some(([x, y, z], copies.min(MAX_WARP_COPIES), radius.clamp(0.0, 1024.0)));
+    }
+    fn set_warp_data(&mut self, data: Vec<f32>) {
+        if data.len() > WARP_DATA {
+            log::warn!("[mod {}] world warp data over {WARP_DATA} floats, the rest left out", self.id);
+        }
+        let v: Vec<f32> = data.into_iter().take(WARP_DATA).map(|f| if f.is_finite() { f } else { 0.0 }).collect();
+        if *self.warp_data != *v {
+            self.warp_data = Arc::from(v);
+        }
     }
     fn hold_world(&mut self, on: bool) {
         self.world_hold = on;

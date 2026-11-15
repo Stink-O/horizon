@@ -25,6 +25,8 @@ struct Globals {
     warp: array<vec4<f32>, 6>,
     // A mod's tint of the hand and held item (render.set-hand-tint), w 1 while on: the hand's globals only.
     hand_tint: vec4<f32>,
+    // A mod's world warp's data (render.set-warp-data, gfx/warp.rs): 256 floats, zeros with no warp on.
+    warp_data: array<vec4<f32>, 64>,
 }
 @group(0) @binding(0) var<uniform> globals: Globals;
 @group(0) @binding(1) var atlas: texture_2d<f32>;

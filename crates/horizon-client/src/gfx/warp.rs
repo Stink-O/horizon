@@ -27,6 +27,8 @@ pub struct WorldWarp<'a> {
     pub anchor: [f64; 3],
     pub copies: u32,
     pub radius: f32,
+    /// `render.set-warp-data`: at most 256 floats, `globals.warp_data` (`data_uniform`).
+    pub data: &'a [f32],
     pub partial_tick: f32,
 }
 
@@ -62,6 +64,17 @@ pub(super) fn uniform(w: &WorldWarp<'_>, camera: DVec3) -> [[f32; 4]; 6] {
     ];
     u
 }
+
+/// `globals.warp_data`: the warp's data, four floats a vec4, zeros past it.
+pub(super) fn data_uniform(data: &[f32]) -> [[f32; 4]; WARP_DATA_VEC4] {
+    let mut u = [[0.0; 4]; WARP_DATA_VEC4];
+    for (k, &f) in data.iter().take(4 * WARP_DATA_VEC4).enumerate() {
+        u[k / 4][k % 4] = f;
+    }
+    u
+}
+/// How many vec4 `globals.warp_data` holds.
+pub(super) const WARP_DATA_VEC4: usize = 64;
 
 /// The visible list's indices of the sections to copy: those within `radius` of the anchor across the land.
 pub(super) fn near(w: &WorldWarp<'_>, camera: DVec3, visible: &[resident::Visible]) -> Vec<usize> {
@@ -292,6 +305,27 @@ mod tests {
         let entity = with_warp(&entity_shader(), for_entities(&source)).expect("the markers");
         validate(&entity).expect("valid");
         assert!(!entity.contains("world_fragment"));
+    }
+
+    #[test]
+    fn the_warps_data_fills_its_vec4_in_order_and_zeros_the_rest() {
+        let u = data_uniform(&[1.0, 2.0, 3.0, 4.0, 5.0]);
+        assert_eq!(u[0], [1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(u[1], [5.0, 0.0, 0.0, 0.0]);
+        assert!(u[2..].iter().all(|v| *v == [0.0; 4]));
+        let long: Vec<f32> = (0..300).map(|i| i as f32).collect();
+        let u = data_uniform(&long);
+        assert_eq!(u[63], [252.0, 253.0, 254.0, 255.0], "what is past 256 is left out");
+        assert_eq!(data_uniform(&[]), [[0.0; 4]; WARP_DATA_VEC4]);
+    }
+
+    #[test]
+    fn a_warp_can_read_its_data() {
+        let source = "fn world_warp(pos: vec3<f32>, copy: u32) -> Warped { return Warped(pos + globals.warp_data[63].xyz, vec3<f32>(1.0)); }\n";
+        let terrain = warped_terrain(source).expect("the markers");
+        validate(&terrain).expect("valid");
+        let entity = with_warp(&entity_shader(), for_entities(source)).expect("the markers");
+        validate(&entity).expect("valid");
     }
 
     #[test]

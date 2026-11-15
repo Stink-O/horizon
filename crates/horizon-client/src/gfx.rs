@@ -167,6 +167,8 @@ struct Globals {
     /// A mod's tint of the hand and held item (`render.set-hand-tint`), in the hand's globals only: what entity.wgsl
     /// multiplies their colour by, w 1 while on (zeroed, as elsewhere: nothing changes).
     hand_tint: [f32; 4],
+    /// A mod's world warp's data (`render.set-warp-data`, gfx/warp.rs's `data_uniform`): zeros with no warp on.
+    warp_data: [[f32; 4]; warp::WARP_DATA_VEC4],
 }
 pub type SectionKey = (i32, i32, i32);
 struct SectionGpu {
@@ -3261,6 +3263,11 @@ impl Renderer {
             },
             warp: warp_uniform.unwrap_or_default(),
             hand_tint: [0.0; 4],
+            warp_data: frame
+                .world_warp
+                .as_ref()
+                .filter(|_| warp_on)
+                .map_or([[0.0; 4]; warp::WARP_DATA_VEC4], |w| warp::data_uniform(w.data)),
         };
         self.uploads
             .buffer(&mut encoder, &self.globals, 0, bytemuck::bytes_of(&globals));

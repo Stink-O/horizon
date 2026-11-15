@@ -326,6 +326,11 @@ interface render {
     /// frame by where it was: more is drawn. `copies` (at most 8) draws the solid sections within `radius` blocks of
     /// (x, y, z) that many times more, each with its number (1 up) as the warp's `copy`.
     warp-on: func(on: bool, x: f64, y: f64, z: f64, copies: u32, radius: f32);
+    /// Floats the world warp reads as `globals.warp_data` (`array<vec4<f32>, 64>`: `data[4 * i + k]` is
+    /// `warp_data[i][k]`), up to 256 (more are left out, logged; a value that is not a number is 0), for what its sixteen
+    /// params can't hold: it can't read `mod_data`. Zeros until set, kept until changed, and zeros again when the mod
+    /// stops and when the player leaves the world. Changing them builds nothing: they are uploaded with the frame.
+    set-warp-data: func(data: list<f32>);
     /// Holds the terrain as it is drawn (off by default): sections that change are worked out and uploaded behind the
     /// ones on screen, and all take their place on the one frame this is turned off, so a mod can change a great deal of
     /// land and show it at a stroke, with no pop-in and no hitch. The world itself changes at once, collisions included.

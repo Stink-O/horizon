@@ -1131,8 +1131,8 @@ fn select_creative_tab(
 }
 
 /// A mod's world warp this frame (`Game::mod_world_warp`): its source and version, its parameters, its anchor, copies
-/// and their radius.
-type ModWorldWarp = (std::sync::Arc<str>, u64, [f32; 16], [f64; 3], u32, f32);
+/// and their radius, its data (`render.set-warp-data`).
+type ModWorldWarp = (std::sync::Arc<str>, u64, [f32; 16], [f64; 3], u32, f32, std::sync::Arc<[f32]>);
 /// A mod's post pass this frame (`Game::mod_post_pass`): its source, the source's version, its parameters, its
 /// data with the data's version, and whether it has the block sprite arrays (capability `atlas`).
 type ModPostPass = (
@@ -10162,6 +10162,7 @@ impl Game<'_> {
                 anchor: w.3,
                 copies: w.4,
                 radius: w.5,
+                data: &w.6,
                 partial_tick: alpha as f32,
             }),
             mod_post: mod_post.as_ref().map(|(source, version, params, data, atlas, history)| {
