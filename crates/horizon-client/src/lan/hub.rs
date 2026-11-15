@@ -2033,6 +2033,21 @@ impl Hub {
                     0 => self.wake(i),
                     _ => {}
                 },
+                // A single-player window's `world.shift-player`: its own server thread's copy of it moved the same,
+                // before the move that follows (sent in order on the same connection). Only the world's owner.
+                S::CustomPayload(p)
+                    if p.channel == crate::player_sync::SHIFT_CHANNEL
+                        && self.singleplayer_owner == Some(self.guests[i].uuid) =>
+                {
+                    if let Some(d) = crate::player_sync::read_shift(&p.data, 512.0) {
+                        let g = &mut self.guests[i];
+                        for k in 0..3 {
+                            g.position[k] += d[k];
+                            g.first_good[k] += d[k];
+                        }
+                        g.moved = true;
+                    }
+                }
                 S::Chat(c) => self.handle_chat(i, c, events),
                 S::ChatAck(p) => self.chat_ack(i, p.offset, events),
                 S::ChatSessionUpdate(p) => self.chat_session_update(i, p, events),

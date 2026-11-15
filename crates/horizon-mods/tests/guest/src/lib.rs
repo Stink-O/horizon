@@ -19,7 +19,8 @@ impl Mod for Guest {
     fn init() -> Result<(Self, Registration), String> {
         let hooks = [
             "spin", "panic", "grow", "hello", "save", "load", "save_key", "fly", "screen", "typed",
-            "surface", "heights", "data", "history", "warp", "hold", "tint", "clear", "columns", "blocks", "sprites",
+            "surface", "heights", "data", "history", "warp", "hold", "tint", "offset", "shift", "clear", "columns", "blocks",
+            "sprites",
         ]
         .into_iter()
         .fold(Registration::new(), Registration::command)
@@ -173,6 +174,17 @@ impl Mod for Guest {
             "tint" => {
                 let c: Vec<f32> = args.split_whitespace().map(|w| w.parse().unwrap_or(f32::NAN)).collect();
                 render::set_hand_tint(c[0], c[1], c[2]);
+                Ok(None)
+            }
+            "offset" => {
+                let c: Vec<f64> = args.split_whitespace().map(|w| w.parse().unwrap_or(f64::NAN)).collect();
+                render::set_view_offset(c[0], c[1], c[2]);
+                Ok(None)
+            }
+            "shift" => {
+                let c: Vec<f64> = args.split_whitespace().map(|w| w.parse().unwrap_or(f64::NAN)).collect();
+                let moved = world::shift_player(c[0], c[1], c[2]);
+                chat::show(&format!("shifted {moved}"));
                 Ok(None)
             }
             "hold" => {

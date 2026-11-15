@@ -9894,7 +9894,7 @@ impl Game<'_> {
         // player's own model stay smooth while the level is frozen.
         let camera_alpha = self.clock.camera_fraction();
         let view = self.camera_view(camera_alpha as f32);
-        let (camera, underwater, view_yaw, view_pitch) = match view {
+        let (eye, underwater, view_yaw, view_pitch) = match view {
             Some((c, yaw, pitch)) => {
                 let s =
                     self.world
@@ -9908,15 +9908,22 @@ impl Game<'_> {
                 self.pitch,
             ),
         };
+        // render.set-view-offset: the world is drawn from `camera`, the offset from the eye (third person's
+        // collision ray ran from the real eye). What the game decides by where the eye is (the fluid and block it is
+        // in and their fog and overlays, the listener, the biome's colours, the field of view) keeps to `eye`.
+        let view_offset = self.mod_view_offset();
+        let camera = view_offset.map_or(eye, |o| eye + glam::DVec3::from_array(o));
         self.audio
-            .set_listener([camera.x, camera.y, camera.z], view_yaw, view_pitch);
+            .set_listener([eye.x, eye.y, eye.z], view_yaw, view_pitch);
         let block = [
-            camera.x.floor() as i32,
-            camera.y.floor() as i32,
-            camera.z.floor() as i32,
+            eye.x.floor() as i32,
+            eye.y.floor() as i32,
+            eye.z.floor() as i32,
         ];
-        // The camera inside an opaque block sees nothing through it: disable.
+        // The camera inside an opaque block sees nothing through it: disable. Drawn from an offset (a world warp
+        // moving the land with it), the real world's caves say nothing of what it sees: disable too.
         let cave_culling = self.settings.horizon.cave_culling
+            && view_offset.is_none()
             && !self
                 .res
                 .facts()
@@ -9945,7 +9952,7 @@ impl Game<'_> {
         let weights = {
             let chunks = &self.world.chunks;
             let plains = biomes.id("minecraft:plains");
-            horizon_client::biome::gaussian_weights(camera.to_array(), |qx, qy, qz| {
+            horizon_client::biome::gaussian_weights(eye.to_array(), |qx, qy, qz| {
                 chunks
                     .get(&(qx >> 2, qz >> 2))
                     .map_or(plains, |c| c.biome(qx * 4, qy * 4, qz * 4))
@@ -10025,7 +10032,11 @@ impl Game<'_> {
                     } else {
                         [0.0; 3]
                     };
-                    let p = h.pos.map(f64::from);
+                    // (drawn from an offset, the block the real eye is on is drawn where the land it stands on is
+                    // drawn: moved with the view)
+                    let p: [f64; 3] = std::array::from_fn(|i| {
+                        f64::from(h.pos[i]) + view_offset.map_or(0.0, |o| o[i])
+                    });
                     f.outline_edges
                         .iter()
                         .map(|e| std::array::from_fn(|i| p[i % 3] + o[i % 3] + e[i]))
@@ -10056,10 +10067,10 @@ impl Game<'_> {
         let fov_degrees = if title {
             85.0
         } else {
-            self.fov_degrees(camera_alpha as f32, camera.to_array())
+            self.fov_degrees(camera_alpha as f32, eye.to_array())
         };
         self.locator_camera =
-            (!title).then_some((camera.to_array(), view_yaw, view_pitch, fov_degrees));
+            (!title).then_some((eye.to_array(), view_yaw, view_pitch, fov_degrees));
         let bob = if title {
             glam::Mat4::IDENTITY
         } else {
@@ -10192,7 +10203,7 @@ impl Game<'_> {
             cave_culling,
             water_fog,
             fog: Some({
-                let mut fog = self.frame_fog(camera, &sky, biome, water_fog);
+                let mut fog = self.frame_fog(eye, &sky, biome, water_fog);
                 // Horizon's fog setting: no distance fog (fluids keep theirs).
                 if !self.settings.horizon.fog
                     && !underwater
@@ -10206,7 +10217,7 @@ impl Game<'_> {
                 }
                 fog
             }),
-            dark_disc: self.dark_disc(camera),
+            dark_disc: self.dark_disc(eye),
             outline,
             outline_after_terrain,
             debug_lines: &debug_lines,
@@ -10246,7 +10257,7 @@ impl Game<'_> {
             },
             stars: stars.filter(|_| self.settings.horizon.sky || title),
             hand: &hand,
-            hand_fov_degrees: self.hud_fov_degrees(camera_alpha as f32, camera.to_array()),
+            hand_fov_degrees: self.hud_fov_degrees(camera_alpha as f32, eye.to_array()),
             screen: &screen,
             pack: pack_inputs,
             border,

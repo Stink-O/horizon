@@ -122,6 +122,8 @@ pub struct Snapshot {
     pub carried: bool,
     /// Whether the local player flies (creative flight, or a spectator): `game.player-flying`.
     pub flying: bool,
+    /// Whether `world.shift-player` can move the local player: there is one, not a spectator, not riding.
+    pub shiftable: bool,
 }
 
 /// What mods asked the game to show since the last [`Mods::drain`].
@@ -174,6 +176,8 @@ pub enum Output {
     /// `world.carry-player`: the local player moved by `delta` this tick in place of their own motion, their view
     /// turned by `turn` degrees (yaw) over the tick.
     Carry { delta: [f32; 3], turn: f32 },
+    /// `world.shift-player`: the local player moved by `delta` at once, nothing in the way, not drawn sliding.
+    Shift { delta: [f64; 3] },
 }
 
 /// A keybind a mod registered (capability `input`).
@@ -205,6 +209,9 @@ pub struct Post {
 
 /// The most `render.set-hand-tint` multiplies the hand's colour by.
 pub const MAX_HAND_TINT: f32 = 8.0;
+
+/// The most `render.set-view-offset` and `world.shift-player` move the camera or the player, blocks on each axis.
+pub const MAX_VIEW_OFFSET: f64 = 512.0;
 
 /// The most times `render.warp-on` draws the land near its anchor again.
 pub const MAX_WARP_COPIES: u32 = 8;
@@ -301,6 +308,8 @@ struct State {
     world_hold_within: Vec<(f64, f64, f64)>,
     /// `render.set-hand-tint` (1, 1, 1: none).
     hand_tint: [f32; 3],
+    /// `render.set-view-offset` (0, 0, 0: none).
+    view_offset: [f64; 3],
     /// Capability `world`: answers to its `surface-height` queries, for its next `poll-surface-heights`.
     surface: Vec<SurfaceHeights>,
     /// Capability `world`: answers to its `read-columns` queries, for its next `poll-columns`.
@@ -486,6 +495,7 @@ impl Mods {
             world_hold: false,
             world_hold_within: Vec::new(),
             hand_tint: [1.0; 3],
+            view_offset: [0.0; 3],
             surface: Vec::new(),
             columns: Vec::new(),
             flying_speed: None,
@@ -810,6 +820,18 @@ impl Mods {
         for e in &mut self.entries {
             if let Some(r) = e.run.as_mut() {
                 r.store.data_mut().hand_tint = [1.0; 3];
+            }
+        }
+    }
+    /// The first running mod's view offset (`render.set-view-offset`), when it has one other than 0, 0, 0.
+    pub fn view_offset(&self) -> Option<[f64; 3]> {
+        self.entries.iter().find_map(|e| Some(e.run.as_ref()?.store.data().view_offset).filter(|o| *o != [0.0; 3]))
+    }
+    /// Puts every mod's view offset back to 0, 0, 0 (the player left the world, or went to another dimension).
+    pub fn clear_view_offsets(&mut self) {
+        for e in &mut self.entries {
+            if let Some(r) = e.run.as_mut() {
+                r.store.data_mut().view_offset = [0.0; 3];
             }
         }
     }
@@ -1174,6 +1196,7 @@ impl render::Host for State {
         self.post_history = false;
         self.world_hold = false;
         self.world_hold_within.clear();
+        self.view_offset = [0.0; 3];
     }
     fn set_history(&mut self, on: bool) {
         self.post_history = on;
@@ -1206,6 +1229,11 @@ impl render::Host for State {
     }
     fn set_hand_tint(&mut self, r: f32, g: f32, b: f32) {
         self.hand_tint = [r, g, b].map(|c| if c.is_finite() { c.clamp(0.0, MAX_HAND_TINT) } else { 1.0 });
+    }
+    fn set_view_offset(&mut self, x: f64, y: f64, z: f64) {
+        if x.is_finite() && y.is_finite() && z.is_finite() {
+            self.view_offset = [x, y, z].map(|c| c.clamp(-MAX_VIEW_OFFSET, MAX_VIEW_OFFSET));
+        }
     }
     fn set_data(&mut self, words: Vec<u32>) {
         if words.len() > POST_DATA_WORDS {
@@ -1399,6 +1427,15 @@ impl world::Host for State {
             turn: if turn.is_finite() { turn.clamp(-6.0, 6.0) } else { 0.0 },
         });
         self.snapshot.carried
+    }
+    fn shift_player(&mut self, x: f64, y: f64, z: f64) -> bool {
+        if !(x.is_finite() && y.is_finite() && z.is_finite()) || !self.snapshot.shiftable {
+            return false;
+        }
+        self.out.push(Output::Shift {
+            delta: [x, y, z].map(|c| c.clamp(-MAX_VIEW_OFFSET, MAX_VIEW_OFFSET)),
+        });
+        true
     }
     fn set_flying_speed(&mut self, speed: Option<f32>) {
         self.flying_speed = speed

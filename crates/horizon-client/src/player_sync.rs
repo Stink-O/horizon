@@ -84,3 +84,56 @@ pub fn teleport_velocity(
     });
     Vec3::new(result[0], result[1], result[2])
 }
+
+/// The channel of the custom payload a single-player window sends its own server thread before the move that follows a
+/// mod's `world.shift-player`: the server moves its copy of the owner by the same amount first, so that move is the
+/// small one it is after the shift (no "moved wrongly" for what the shift passed through, nothing sent back).
+pub const SHIFT_CHANNEL: &str = "horizon:shift_player";
+
+/// The shift's payload: x, y, z as big-endian doubles.
+pub fn shift_payload(delta: [f64; 3]) -> Vec<u8> {
+    delta.iter().flat_map(|c| c.to_be_bytes()).collect()
+}
+
+/// A shift's payload read back: none unless it is three finite doubles, each within `limit`.
+pub fn read_shift(data: &[u8], limit: f64) -> Option<[f64; 3]> {
+    if data.len() != 24 {
+        return None;
+    }
+    let d: [f64; 3] = std::array::from_fn(|k| f64::from_be_bytes(data[k * 8..k * 8 + 8].try_into().unwrap()));
+    d.iter().all(|c| c.is_finite() && c.abs() <= limit).then_some(d)
+}
+
+/// `world.shift-player` on the window's player: `position` and the position the frames interpolate from (`previous`)
+/// both moved by `delta`, so every frame between two ticks draws them `delta` further on and none draws them sliding.
+pub fn shift(position: &mut Vec3, previous: &mut Vec3, delta: [f64; 3]) {
+    let d = Vec3::new(delta[0], delta[1], delta[2]);
+    *position = position.add_vector(d);
+    *previous = previous.add_vector(d);
+}
+
+#[cfg(test)]
+mod shift_tests {
+    use super::*;
+
+    #[test]
+    fn a_shift_is_not_interpolated() {
+        let (mut at, mut was) = (Vec3::new(10.0, 64.0, -3.0), Vec3::new(9.8, 64.1, -3.0));
+        let lerp = |a: Vec3, b: Vec3, t: f64| Vec3::new(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t);
+        let before: Vec<Vec3> = (0..=10).map(|n| lerp(was, at, f64::from(n) / 10.0)).collect();
+        shift(&mut at, &mut was, [1.5, -38.0, 0.25]);
+        for (n, b) in before.iter().enumerate() {
+            let now = lerp(was, at, n as f64 / 10.0);
+            assert!((now.x - b.x - 1.5).abs() < 1e-9 && (now.y - b.y + 38.0).abs() < 1e-9 && (now.z - b.z - 0.25).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn a_shift_payload_reads_back_and_refuses_junk() {
+        let d = [1.5, -38.0, 1e-3];
+        assert_eq!(read_shift(&shift_payload(d), 512.0), Some(d));
+        assert_eq!(read_shift(&shift_payload([f64::NAN, 0.0, 0.0]), 512.0), None);
+        assert_eq!(read_shift(&shift_payload([600.0, 0.0, 0.0]), 512.0), None);
+        assert_eq!(read_shift(&[0; 23], 512.0), None);
+    }
+}

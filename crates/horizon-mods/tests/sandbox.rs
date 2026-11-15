@@ -392,6 +392,55 @@ fn a_hand_tint_is_kept_clamped_and_gone_with_the_mod() {
 }
 
 #[test]
+fn a_view_offset_is_kept_clamped_and_cleared() {
+    let mut mods = load("horizon_mods_test_guest.hmod");
+    assert_eq!(mods.view_offset(), None);
+    mods.command("offset 1.5 -38 0.25");
+    assert_eq!(mods.view_offset(), Some([1.5, -38.0, 0.25]));
+    mods.command("offset 2 x 3");
+    assert_eq!(mods.view_offset(), Some([1.5, -38.0, 0.25]), "a value that is not a number leaves it as it was");
+    mods.command("offset -9999 9999 4");
+    let max = horizon_mods::MAX_VIEW_OFFSET;
+    assert_eq!(mods.view_offset(), Some([-max, max, 4.0]));
+    mods.command("offset 0 0 0");
+    assert_eq!(mods.view_offset(), None, "0, 0, 0 is none");
+    mods.command("offset 0 5 0");
+    mods.command("clear");
+    assert_eq!(mods.view_offset(), None, "clear-post clears it");
+    mods.command("offset 0 5 0");
+    mods.clear_view_offsets();
+    assert_eq!(mods.view_offset(), None, "leaving the world or another dimension clears it");
+    mods.command("offset 0 5 0");
+    mods.command("panic");
+    assert_eq!(mods.view_offset(), None, "a mod that stopped moves nothing");
+}
+
+#[test]
+fn a_shift_moves_a_player_that_can_be_moved() {
+    let mut mods = load("horizon_mods_test_guest.hmod");
+    let said = |out: Vec<Output>| -> Vec<String> {
+        out.into_iter().filter_map(|o| match o {
+            Output::Chat { text, .. } => Some(text),
+            _ => None,
+        }).collect()
+    };
+    mods.drain();
+    // No player that can be moved (none, a spectator, a rider): nothing asked, false.
+    mods.command("shift 0 3 0");
+    assert_eq!(said(mods.drain()), ["shifted false"]);
+    mods.set_snapshot(Snapshot { shiftable: true, ..player() });
+    mods.command("shift 1 nan 0");
+    let out = mods.drain();
+    assert!(out.iter().all(|o| !matches!(o, Output::Shift { .. })));
+    assert_eq!(said(out), ["shifted false"]);
+    mods.command("shift 2 -9999 0.5");
+    let out = mods.drain();
+    let max = horizon_mods::MAX_VIEW_OFFSET;
+    assert!(out.contains(&Output::Shift { delta: [2.0, -max, 0.5] }));
+    assert_eq!(said(out), ["shifted true"]);
+}
+
+#[test]
 fn a_history_is_asked_for_and_ended_with_the_pass() {
     let mut mods = load("horizon_mods_test_guest.hmod");
     mods.command("history off");

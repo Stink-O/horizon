@@ -78,6 +78,9 @@ pub(super) struct ModsState {
     /// Answers to the mods' `world.read-columns` queries, read on the world's thread, for their next tick.
     #[cfg(feature = "mods")]
     columns: std::sync::Arc<std::sync::Mutex<Vec<(String, horizon_mods::ColumnBlocks)>>>,
+    /// The dimension the mods last saw the player in: in another, their view offsets go (`render.set-view-offset`).
+    #[cfg(feature = "mods")]
+    dimension: Option<super::Dim>,
     /// The resources the mods' `atlas` calls were last answered from, and how many times they changed.
     #[cfg(feature = "mods")]
     atlas: Option<(std::sync::Arc<horizon_client::streaming::WorkerContext>, u64)>,
@@ -253,6 +256,9 @@ impl Game<'_> {
     pub(super) fn mod_hand_tint(&self) -> Option<[f32; 3]> {
         None
     }
+    pub(super) fn mod_view_offset(&self) -> Option<[f64; 3]> {
+        None
+    }
     pub(super) fn mods_left_world(&mut self) {}
     pub(super) fn mod_use_start(&mut self) -> bool {
         false
@@ -295,9 +301,48 @@ impl Game<'_> {
         self.player.as_ref()?;
         self.mods.mods.hand_tint()
     }
+    /// A running mod's view offset (`render.set-view-offset`): how far from the player's eye the world is drawn, while
+    /// in a world.
+    pub(super) fn mod_view_offset(&self) -> Option<[f64; 3]> {
+        self.player.as_ref()?;
+        self.mods.mods.view_offset()
+    }
     /// The player left the world: what the mods set for it that would outlast it goes.
     pub(super) fn mods_left_world(&mut self) {
         self.mods.mods.clear_hand_tints();
+        self.mods.mods.clear_view_offsets();
+        self.mods.dimension = None;
+    }
+    /// Before each call into the mods: with no player, or in another dimension than they last saw, the view offsets
+    /// they set go.
+    fn mods_follow_dimension(&mut self) {
+        let now = self.player.as_ref().map(|_| self.dim);
+        if self.mods.dimension != now {
+            if self.mods.dimension.is_some() {
+                self.mods.mods.clear_view_offsets();
+            }
+            self.mods.dimension = now;
+        }
+    }
+    /// `world.shift-player`: the window's player moved at once, the position the frames interpolate from with them, so
+    /// no frame draws them sliding; velocity, fall distance and flight as they were. Single player's server thread
+    /// is told first, on the connection the move that follows goes on, so it takes that move as the small one it is.
+    fn shift_local_player(&mut self, delta: [f64; 3]) {
+        let Some(p) = self.player.as_mut() else {
+            return;
+        };
+        if p.spectator || self.riding.is_some() {
+            return;
+        }
+        horizon_client::player_sync::shift(&mut p.position, &mut self.previous_position, delta);
+        if self.integrated.is_some() {
+            self.send(horizon_protocol::packets::play::Serverbound::CustomPayload(
+                horizon_protocol::packets::configuration::CustomPayload {
+                    channel: horizon_client::player_sync::SHIFT_CHANNEL.into(),
+                    data: horizon_client::player_sync::shift_payload(delta),
+                },
+            ));
+        }
     }
     /// Reads `horizon-mods/` and the dev mods, and starts the ones turned on.
     pub(super) fn start_mods(&mut self) {
@@ -484,6 +529,7 @@ impl Game<'_> {
             view_hit,
             carried: !self.mods.carry_refused,
             flying: self.player.as_ref().is_some_and(|p| p.flying || p.spectator),
+            shiftable: self.player.as_ref().is_some_and(|p| !p.spectator) && self.riding.is_none(),
         }
     }
     /// The stack in inventory slot `slot` as mods see it.
@@ -548,6 +594,7 @@ impl Game<'_> {
             for (id, answer) in answers {
                 self.mods.mods.push_columns(&id, answer);
             }
+            self.mods_follow_dimension();
             let snapshot = self.mod_snapshot();
             self.mods.mods.set_snapshot(snapshot);
             let ticks = self.ticks;
@@ -639,6 +686,7 @@ impl Game<'_> {
             )
         });
         self.mods.mods.set_cursor(cursor);
+        self.mods_follow_dimension();
         self.mods.mods.frame(elapsed.as_secs_f32());
         self.show_mod_output();
     }
@@ -731,6 +779,11 @@ impl Game<'_> {
                 // (a carry: the player's move this tick, made in the player's own tick: `Game::tick`)
                 Output::Carry { delta, turn } => {
                     self.mods.carry = Some((delta, turn));
+                    continue;
+                }
+                // (a shift: at once, before the next frame is drawn)
+                Output::Shift { delta } => {
+                    self.shift_local_player(delta);
                     continue;
                 }
                 // (a push while a carry holds them is its throw: what they are let go with, `carry_step`)
