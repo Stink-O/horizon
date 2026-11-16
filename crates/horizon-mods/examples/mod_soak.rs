@@ -386,6 +386,7 @@ impl Soak {
         let b = self.world.col(tx, tz)[(ty - 1 - MIN_Y).max(0) as usize];
         let block = self.world.names[b as usize].clone();
         Snapshot {
+            shiftable: true,
             player: Some(Player {
                 x: f64::from(tx + self.me.0) + 0.5,
                 y: f64::from(ty) + 40.0,
